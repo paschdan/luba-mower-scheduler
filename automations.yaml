@@ -1,565 +1,201 @@
-- id: unified_back_lawn_scheduler
-  alias: Back Lawn Unified Scheduler
-  trigger:
-  - platform: time
-    at: input_datetime.back_lawn_next_time
-  condition:
-  - condition: state
-    entity_id: input_boolean.mowing_automation_enabled
-    state: 'on'
-  action:
-  - choose:
-    - conditions:
-      - condition: not
-        conditions:
-        - condition: state
-          entity_id: input_select.back_lawn_schedule
-          state: never
-        - condition: state
-          entity_id: input_boolean.do_not_mow
-          state: 'on'
-      sequence:
-      - service: script.mow_back_lawn
-    default:
-    - service: input_datetime.set_datetime
-      target:
-        entity_id: input_datetime.back_lawn_next_time
-      data:
-        datetime: "{% set now = now() %}
-          {% set new_time = now + timedelta(hours=1) %}
-          {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-          {% set sunrise_tomorrow = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
-          {% set offset = 0 %}
-          {% if new_time.timestamp() >= (sunset - 7200) %}
-            {% set final_time = sunrise_tomorrow + 7200 + (offset * 1800) %}
-          {% else %}
-            {% set final_time = new_time.timestamp() %}
-          {% endif %}
-          {{ final_time | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
-          "
-  mode: single
+# Scheduler + rain/night automations.
+# Add under   automation: !include automations.yaml   in configuration.yaml
+#
+# One scheduler per zone (Lawn 1/2/3) plus four shared rain/night automations.
+# The schedulers fire at each zone's <lawn>_next_time and run the mow if:
+#   - mowing automation is enabled,
+#   - the zone's schedule isn't "never",
+#   - the global do_not_mow flag is off (rain/night), and
+#   - the mower isn't already mowing/returning.
+# Otherwise the next_time is pushed forward an hour (jumping past dusk at night),
+# so a blocked zone retries automatically.
 
-- id: unified_solar_lawn_scheduler
-  alias: Solar Lawn Unified Scheduler
-  trigger:
-  - platform: time
-    at: input_datetime.solar_lawn_next_time
-  condition:
-  - condition: state
-    entity_id: input_boolean.mowing_automation_enabled
-    state: 'on'
-  action:
-  - choose:
-    - conditions:
-      - condition: not
-        conditions:
-        - condition: state
-          entity_id: input_select.solar_lawn_schedule
-          state: never
-        - condition: state
-          entity_id: input_boolean.do_not_mow
-          state: 'on'
-      sequence:
-      - service: script.mow_solar_lawn
-    default:
-    - service: input_datetime.set_datetime
-      target:
-        entity_id: input_datetime.solar_lawn_next_time
-      data:
-        datetime: "{% set now = now() %}
-          {% set new_time = now + timedelta(hours=1) %}
-          {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-          {% set sunrise_tomorrow = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
-          {% set offset = 1 %}
-          {% if new_time.timestamp() >= (sunset - 7200) %}
-            {% set final_time = sunrise_tomorrow + 7200 + (offset * 1800) %}
-          {% else %}
-            {% set final_time = new_time.timestamp() %}
-          {% endif %}
-          {{ final_time | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
-          "
-  mode: single
+# ===========================================================================
+# Per-zone schedulers
+# ===========================================================================
 
-- id: unified_bottom_grass_scheduler
-  alias: Bottom Grass Unified Scheduler
+- id: lawn_1_scheduler
+  alias: Lawn 1 Scheduler
   trigger:
-  - platform: time
-    at: input_datetime.bottom_grass_next_time
+    - platform: time
+      at: input_datetime.lawn_1_next_time
   condition:
-  - condition: state
-    entity_id: input_boolean.mowing_automation_enabled
-    state: 'on'
-  action:
-  - choose:
-    - conditions:
-      - condition: not
-        conditions:
-        - condition: state
-          entity_id: input_select.bottom_grass_schedule
-          state: never
-        - condition: state
-          entity_id: input_boolean.do_not_mow
-          state: 'on'
-      sequence:
-      - service: script.mow_bottom_grass
-    default:
-    - service: input_datetime.set_datetime
-      target:
-        entity_id: input_datetime.bottom_grass_next_time
-      data:
-        datetime: "{% set now = now() %}
-          {% set new_time = now + timedelta(hours=1) %}
-          {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-          {% set sunrise_tomorrow = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
-          {% set offset = 2 %}
-          {% if new_time.timestamp() >= (sunset - 7200) %}
-            {% set final_time = sunrise_tomorrow + 7200 + (offset * 1800) %}
-          {% else %}
-            {% set final_time = new_time.timestamp() %}
-          {% endif %}
-          {{ final_time | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
-          "
-  mode: single
-
-- id: unified_golf_lawn_scheduler
-  alias: Golf Lawn Unified Scheduler
-  trigger:
-  - platform: time
-    at: input_datetime.golf_lawn_next_time
-  condition:
-  - condition: state
-    entity_id: input_boolean.mowing_automation_enabled
-    state: 'on'
-  action:
-  - choose:
-    - conditions:
-      - condition: not
-        conditions:
-        - condition: state
-          entity_id: input_select.golf_lawn_schedule
-          state: never
-        - condition: state
-          entity_id: input_boolean.do_not_mow
-          state: 'on'
-      sequence:
-      - service: script.mow_golf_lawn
-    default:
-    - service: input_datetime.set_datetime
-      target:
-        entity_id: input_datetime.golf_lawn_next_time
-      data:
-        datetime: "{% set now = now() %}
-          {% set new_time = now + timedelta(hours=1) %}
-          {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-          {% set sunrise_tomorrow = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
-          {% set offset = 3 %}
-          {% if new_time.timestamp() >= (sunset - 7200) %}
-            {% set final_time = sunrise_tomorrow + 7200 + (offset * 1800) %}
-          {% else %}
-            {% set final_time = new_time.timestamp() %}
-          {% endif %}
-          {{ final_time | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
-          "
-  mode: single
-
-- id: unified_top_lawn_scheduler
-  alias: Top Lawn Unified Scheduler
-  trigger:
-  - platform: time
-    at: input_datetime.top_lawn_next_time
-  condition:
-  - condition: state
-    entity_id: input_boolean.mowing_automation_enabled
-    state: 'on'
-  action:
-  - choose:
-    - conditions:
-      - condition: not
-        conditions:
-        - condition: state
-          entity_id: input_select.top_lawn_schedule
-          state: never
-        - condition: state
-          entity_id: input_boolean.do_not_mow
-          state: 'on'
-      sequence:
-      - service: script.mow_top_lawn
-    default:
-    - service: input_datetime.set_datetime
-      target:
-        entity_id: input_datetime.top_lawn_next_time
-      data:
-        datetime: "{% set now = now() %}
-          {% set new_time = now + timedelta(hours=1) %}
-          {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-          {% set sunrise_tomorrow = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
-          {% set offset = 4 %}
-          {% if new_time.timestamp() >= (sunset - 7200) %}
-            {% set final_time = sunrise_tomorrow + 7200 + (offset * 1800) %}
-          {% else %}
-            {% set final_time = new_time.timestamp() %}
-          {% endif %}
-          {{ final_time | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
-          "
-  mode: single
-
-- id: unified_path_to_top_scheduler
-  alias: Path to Top Unified Scheduler
-  trigger:
-  - platform: time
-    at: input_datetime.path_to_top_next_time
-  condition:
-  - condition: state
-    entity_id: input_boolean.mowing_automation_enabled
-    state: 'on'
-  action:
-  - choose:
-    - conditions:
-      - condition: not
-        conditions:
-        - condition: state
-          entity_id: input_select.path_to_top_schedule
-          state: never
-        - condition: state
-          entity_id: input_boolean.do_not_mow
-          state: 'on'
-      sequence:
-      - service: script.mow_path_to_top
-    default:
-    - service: input_datetime.set_datetime
-      target:
-        entity_id: input_datetime.path_to_top_next_time
-      data:
-        datetime: "{% set now = now() %}
-          {% set new_time = now + timedelta(hours=1) %}
-          {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-          {% set sunrise_tomorrow = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
-          {% set offset = 5 %}
-          {% if new_time.timestamp() >= (sunset - 7200) %}
-            {% set final_time = sunrise_tomorrow + 7200 + (offset * 1800) %}
-          {% else %}
-            {% set final_time = new_time.timestamp() %}
-          {% endif %}
-          {{ final_time | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
-          "
-  mode: single
-
-- id: unified_drive_lawn_scheduler
-  alias: Drive Lawn Unified Scheduler
-  trigger:
-  - platform: time
-    at: input_datetime.drive_lawn_next_time
-  condition:
-  - condition: state
-    entity_id: input_boolean.mowing_automation_enabled
-    state: 'on'
-  action:
-  - choose:
-    - conditions:
-      - condition: not
-        conditions:
-        - condition: state
-          entity_id: input_select.drive_lawn_schedule
-          state: never
-        - condition: state
-          entity_id: input_boolean.do_not_mow
-          state: 'on'
-      sequence:
-      - service: script.mow_drive_lawn
-    default:
-    - service: input_datetime.set_datetime
-      target:
-        entity_id: input_datetime.drive_lawn_next_time
-      data:
-        datetime: "{% set now = now() %}
-          {% set new_time = now + timedelta(hours=1) %}
-          {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
-          {% set sunrise_tomorrow = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
-          {% set offset = 6 %}
-          {% if new_time.timestamp() >= (sunset - 7200) %}
-            {% set final_time = sunrise_tomorrow + 7200 + (offset * 1800) %}
-          {% else %}
-            {% set final_time = new_time.timestamp() %}
-          {% endif %}
-          {{ final_time | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
-          "
-  mode: single
-
-- id: eaa091c6eed04846ba3f9c7952370ac5
-  alias: Update Last Lawn Mowed Name
-  triggers:
-  - entity_id:
-    - input_datetime.back_lawn_last_mow_1
-    - input_datetime.bottom_grass_last_mow_1
-    - input_datetime.golf_lawn_last_mow_1
-    - input_datetime.top_lawn_last_mow_1
-    - input_datetime.solar_lawn_last_mow_1
-    - input_datetime.drive_lawn_last_mow_1
-    trigger: state
-  actions:
-  - variables:
-      lawns:
-        input_datetime.back_lawn_last_mow_1: Back Lawn
-        input_datetime.bottom_grass_last_mow_1: Bottom Grass
-        input_datetime.golf_lawn_last_mow_1: Golf Lawn
-        input_datetime.path_to_top_last_mow_1: Path to Top
-        input_datetime.top_lawn_last_mow_1: Top Lawn
-        input_datetime.solar_lawn_last_mow_1: Solar Lawn
-        input_datetime.drive_lawn_last_mow_1: Drive Lawn
-  - choose:
-    - conditions: []
-      sequence:
-      - variables:
-          last_mow: "{% set last = namespace(entity='', timestamp=0) %} {% for entity_id,
-            name in lawns.items() %}\n  {% set ts = state_attr(entity_id, 'timestamp')
-            %}\n  {% if ts is number and ts > last.timestamp %}\n    {% set last.entity
-            = name %}\n    {% set last.timestamp = ts %}\n  {% endif %}\n{% endfor
-            %} {{ last.entity }}\n"
-      - target:
-          entity_id: input_text.last_lawn_mowed
-        data:
-          value: '{{ last_mow }}'
-        action: input_text.set_value
-  mode: single
-- id: do_not_mow_when_working
-  alias: Do not mow when working
-  description: ''
-  triggers:
-  - trigger: state
-    entity_id:
-    - sensor.labby_activity_mode
-    to: MODE_WORKING
-  - trigger: state
-    entity_id:
-    - lawn_mower.labby
-    to: mowing
-    for:
-      hours: 0
-      minutes: 2
-      seconds: 0
-  conditions: []
-  actions:
-  - action: input_boolean.turn_on
-    metadata: {}
-    data: {}
-    target:
-      entity_id: input_boolean.do_not_mow
-  - action: input_text.set_value
-    metadata: {}
-    data:
-      value: mowing or charging
-    target:
-      entity_id: input_text.reason_no_mow
-  mode: single
-- id: do_not_mow_if_heavy_rain
-  alias: Do Not Mow if Heavy Rain
-  triggers:
-  - entity_id: sensor.owmh_home_day0rain
-    trigger: state
-  - minutes: /30
-    trigger: time_pattern
-  conditions:
-  - or:
-    - condition: template
-      value_template: '{{ states(''sensor.owmh_home_day0rain'') | float > 3 }}'
-    - condition: template
-      value_template: '{{ states(''sensor.sevenoaks_probability_of_precipitation'')
-        | float > 50 }}'
-  actions:
-  - entity_id: input_boolean.do_not_mow
-    action: input_boolean.turn_on
-  - if:
-    - condition: template
-      value_template: '{{ states(''sensor.owmh_home_day0rain'') | float > 3 }}'
-    then:
-    - action: input_text.set_value
-      metadata: {}
-      data:
-        value: wet ground
-      target:
-        entity_id: input_text.reason_no_mow
-    else:
-    - action: input_text.set_value
-      metadata: {}
-      data:
-        value: rain soon
-      target:
-        entity_id: input_text.reason_no_mow
-- id: reset_do_not_mow_if_no_heavy_rain
-  alias: Reset Do Not Mow if No Heavy Rain
-  triggers:
-  - entity_id: sensor.owmh_home_day0rain
-    trigger: state
-  - minutes: /30
-    trigger: time_pattern
-  - trigger: numeric_state
-    entity_id:
-    - sensor.labby_battery
-    above: 97
-  conditions:
-  - condition: and
-    conditions:
-    - condition: template
-      value_template: '{{ states(''sensor.owmh_home_day0rain'') | float <= 3 }}'
-    - condition: template
-      value_template: '{{ states(''sensor.sevenoaks_probability_of_precipitation'')
-        | float <= 50 }}'
     - condition: state
-      entity_id: sensor.labby_activity_mode
-      state: MODE_READY
-    - condition: numeric_state
-      entity_id: sensor.labby_battery
-      above: 95
+      entity_id: input_boolean.mowing_automation_enabled
+      state: "on"
+  action:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: >
+                {{ not is_state('input_select.lawn_1_schedule', 'never')
+                   and is_state('input_boolean.do_not_mow', 'off')
+                   and states('lawn_mower.mower') not in ['mowing', 'returning'] }}
+          sequence:
+            - action: script.mow_lawn_1
+      default:
+        - action: input_datetime.set_datetime
+          target: { entity_id: input_datetime.lawn_1_next_time }
+          data:
+            datetime: >
+              {% set t = now() + timedelta(hours=1) %}
+              {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
+              {% set sunrise = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
+              {% if t.timestamp() >= (sunset - 7200) %}
+                {{ (sunrise + 7200) | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
+              {% else %}
+                {{ t.strftime('%Y-%m-%d %H:%M:%S') }}
+              {% endif %}
+  mode: single
+
+- id: lawn_2_scheduler
+  alias: Lawn 2 Scheduler
+  trigger:
+    - platform: time
+      at: input_datetime.lawn_2_next_time
+  condition:
+    - condition: state
+      entity_id: input_boolean.mowing_automation_enabled
+      state: "on"
+  action:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: >
+                {{ not is_state('input_select.lawn_2_schedule', 'never')
+                   and is_state('input_boolean.do_not_mow', 'off')
+                   and states('lawn_mower.mower') not in ['mowing', 'returning'] }}
+          sequence:
+            - action: script.mow_lawn_2
+      default:
+        - action: input_datetime.set_datetime
+          target: { entity_id: input_datetime.lawn_2_next_time }
+          data:
+            datetime: >
+              {% set t = now() + timedelta(hours=1) %}
+              {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
+              {% set sunrise = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
+              {% if t.timestamp() >= (sunset - 7200) %}
+                {{ (sunrise + 7200) | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
+              {% else %}
+                {{ t.strftime('%Y-%m-%d %H:%M:%S') }}
+              {% endif %}
+  mode: single
+
+- id: lawn_3_scheduler
+  alias: Lawn 3 Scheduler
+  trigger:
+    - platform: time
+      at: input_datetime.lawn_3_next_time
+  condition:
+    - condition: state
+      entity_id: input_boolean.mowing_automation_enabled
+      state: "on"
+  action:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: >
+                {{ not is_state('input_select.lawn_3_schedule', 'never')
+                   and is_state('input_boolean.do_not_mow', 'off')
+                   and states('lawn_mower.mower') not in ['mowing', 'returning'] }}
+          sequence:
+            - action: script.mow_lawn_3
+      default:
+        - action: input_datetime.set_datetime
+          target: { entity_id: input_datetime.lawn_3_next_time }
+          data:
+            datetime: >
+              {% set t = now() + timedelta(hours=1) %}
+              {% set sunset = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
+              {% set sunrise = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
+              {% if t.timestamp() >= (sunset - 7200) %}
+                {{ (sunrise + 7200) | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
+              {% else %}
+                {{ t.strftime('%Y-%m-%d %H:%M:%S') }}
+              {% endif %}
+  mode: single
+
+# ===========================================================================
+# Rain delay (optional - needs sensor.rain_today / sensor.rain_probability,
+# see template.yaml). With no rain sensors these simply never trigger.
+# ===========================================================================
+
+- id: do_not_mow_if_rain
+  alias: Do Not Mow if Rain
+  mode: restart
+  trigger:
+    - platform: time_pattern
+      minutes: "/30"
+  condition:
+    - condition: template
+      value_template: >
+        {{ states('sensor.rain_today') | float(0) > 3
+           or states('sensor.rain_probability') | float(0) > 50 }}
+  action:
+    - action: input_boolean.turn_on
+      target: { entity_id: input_boolean.do_not_mow }
+    - action: input_text.set_value
+      target: { entity_id: input_text.reason_no_mow }
+      data:
+        value: >
+          {% if states('sensor.rain_today') | float(0) > 3 %}wet ground{% else %}rain soon{% endif %}
+
+- id: reset_do_not_mow_if_dry
+  alias: Reset Do Not Mow if Dry
+  trigger:
+    - platform: time_pattern
+      minutes: "/30"
+  condition:
+    - condition: template
+      value_template: >
+        {{ states('sensor.rain_today') | float(0) <= 3
+           and states('sensor.rain_probability') | float(0) <= 50 }}
+    # Only auto-clear during the day, so the night block below isn't undone.
     - condition: sun
       after: sunrise
-      after_offset: 01:00:00
+      after_offset: "01:00:00"
       before: sunset
-      before_offset: -01:00:00
-  actions:
-  - target:
-      entity_id: input_boolean.do_not_mow
-    action: input_boolean.turn_off
-    data: {}
-  mode: single
-- id: do_not_mow_before_sunset
-  alias: Do Not Mow Before Sunset
-  triggers:
-  - event: sunset
-    offset: -01:00
-    trigger: sun
-  conditions:
-  - condition: state
-    entity_id: input_boolean.block_night_mowing
-    state: 'on'
-  actions:
-  - target:
-      entity_id: input_boolean.do_not_mow
-    action: input_boolean.turn_on
-    data: {}
-  - action: input_text.set_value
-    metadata: {}
-    data:
-      value: night time
-    target:
-      entity_id: input_text.reason_no_mow
+      before_offset: "-01:00:00"
+  action:
+    - action: input_boolean.turn_off
+      target: { entity_id: input_boolean.do_not_mow }
+
+# ===========================================================================
+# Night block (optional - controlled by input_boolean.block_night_mowing)
+# ===========================================================================
+
+- id: block_mowing_at_night
+  alias: Block Mowing at Night
+  trigger:
+    - platform: sun
+      event: sunset
+      offset: "-01:00:00"
+  condition:
+    - condition: state
+      entity_id: input_boolean.block_night_mowing
+      state: "on"
+  action:
+    - action: input_boolean.turn_on
+      target: { entity_id: input_boolean.do_not_mow }
+    - action: input_text.set_value
+      target: { entity_id: input_text.reason_no_mow }
+      data: { value: night time }
+
 - id: allow_mowing_at_sunrise
   alias: Allow Mowing at Sunrise
-  triggers:
-  - event: sunrise
-    trigger: sun
-    offset: '1:00:00'
-  conditions:
-  - condition: state
-    entity_id: input_boolean.block_night_mowing
-    state: 'on'
-  - condition: template
-    value_template: '{{ states(''sensor.owmh_home_day0rain'') | float < 3 }}'
-  - condition: template
-    value_template: '{{ states(''sensor.sevenoaks_probability_of_precipitation'')
-      | float < 50 }}'
-  actions:
-  - target:
-      entity_id: input_boolean.do_not_mow
-    action: input_boolean.turn_off
-    data: {}
-- id: '1745145855145'
-  alias: Add Mowing Hours on Mow End
   trigger:
-  - platform: state
-    entity_id: lawn_mower.labby
-    from: mowing
-    to: returning
-  condition: []
+    - platform: sun
+      event: sunrise
+      offset: "01:00:00"
+  condition:
+    - condition: state
+      entity_id: input_boolean.block_night_mowing
+      state: "on"
+    - condition: template
+      value_template: >
+        {{ states('sensor.rain_today') | float(0) <= 3
+           and states('sensor.rain_probability') | float(0) <= 50 }}
   action:
-  - service: input_number.set_value
-    data:
-      entity_id: input_number.hours_since_last_blade_maintenance
-      value: '{% set current = states(''input_number.hours_since_last_blade_maintenance'')
-        | float(0) %} {% set job_seconds = states(''sensor.labby_task_duration'')
-        | float(0) %} {% set job_hours = job_seconds / 3600 %} {{ (current + job_hours)
-        | round(1) }}
-
-        '
-  mode: single
-- id: '1732439665558'
-  alias: Close gate at 9pm
-  description: ''
-  triggers:
-  - trigger: time
-    at: '21:00:00'
-  conditions: []
-  actions:
-  - action: input_boolean.turn_off
-    metadata: {}
-    data: {}
-    target:
-      entity_id: input_boolean.keep_gate_open
-  - action: switch.turn_off
-    metadata: {}
-    data: {}
-    target:
-      entity_id: switch.gate
-  mode: single
-- id: '1732439712005'
-  alias: Open gate at 9am
-  description: ''
-  triggers:
-  - trigger: time
-    at: 09:00:00
-  conditions: []
-  actions:
-  - action: switch.turn_on
-    target:
-      entity_id:
-      - switch.gate_detect
-    data: {}
-  - action: input_boolean.turn_on
-    metadata: {}
-    data: {}
-    target:
-      entity_id: input_boolean.keep_gate_open
-  mode: single
-- id: 24c38ae9869d4d2dbaa0d7ccc5a9a5c9
-  alias: Update Last Selected Scene
-  triggers:
-  - event_type: call_service
-    event_data:
-      domain: scene
-      service: turn_on
-    trigger: event
-  conditions:
-  - condition: template
-    value_template: >-
-      {% set entity = trigger.event.data.service_data.entity_id %}
-      {% set allowed_scenes = [
-        'scene.downstairs_standard',
-        'scene.downstairs_soft',
-        'scene.downstairs_very_soft',
-        'scene.downstairs_bright',
-        'scene.downstairs_sunny',
-        'scene.piano',
-        'scene.downstairs_poker',
-        'scene.downstairs_off'
-      ] %}
-      {% if entity is string %}
-        {{ entity in allowed_scenes }}
-      {% elif entity is iterable %}
-        {{ entity[0] in allowed_scenes }}
-      {% else %}
-        false
-      {% endif %}
-  actions:
-  - data:
-      entity_id: input_text.last_selected_scene
-      value: >-
-        {% set entity = trigger.event.data.service_data.entity_id %}
-        {% if entity is string %}
-          {% set parts = entity.split('.') %}
-          {{ (parts[1] if parts | length > 1 else entity) | replace('_', ' ') | title }}
-        {% elif entity is iterable %}
-          {% set parts = entity[0].split('.') %}
-          {{ (parts[1] if parts | length > 1 else entity[0]) | replace('_', ' ') | title }}
-        {% else %}
-          Unknown
-        {% endif %}
-    action: input_text.set_value
+    - action: input_boolean.turn_off
+      target: { entity_id: input_boolean.do_not_mow }

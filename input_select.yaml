@@ -1,43 +1,31 @@
-back_lawn_schedule:
-  name: Back Lawn Schedule
-  options:
-    - never
-    - once per week
-    - twice per week
+# Per-zone mow frequency.
+# Add under   input_select: !include input_select.yaml   in configuration.yaml
+#
+# One block per lawn. Copy/rename for as many zones as you have.
 
-bottom_grass_schedule:
-  name: Bottom Grass Schedule
+lawn_1_schedule:
+  name: Lawn 1 Schedule
   options:
     - never
     - once per week
     - twice per week
+  initial: never
+  icon: mdi:calendar-clock
 
-golf_lawn_schedule:
-  name: Golf Lawn Schedule
+lawn_2_schedule:
+  name: Lawn 2 Schedule
   options:
     - never
     - once per week
     - twice per week
+  initial: never
+  icon: mdi:calendar-clock
 
-path_to_top_schedule:
-  name: Path to Top Schedule
+lawn_3_schedule:
+  name: Lawn 3 Schedule
   options:
     - never
     - once per week
     - twice per week
-
-top_lawn_schedule:
-  name: Top Lawn Schedule
-  options:
-    - never
-    - once per week
-    - twice per week
-    
-blade_maintenance_stage:
-  name: Blade Maintenance Stage
-  options:
-    - Swap discs
-    - Rotate blades
-    - Swap discs again
-    - New blades
-  initial: Swap discs
+  initial: never
+  icon: mdi:calendar-clock

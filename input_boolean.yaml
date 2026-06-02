@@ -1,5 +1,14 @@
+# Helpers that gate the scheduler.
+# Add under   input_boolean: !include input_boolean.yaml   in configuration.yaml
+
+mowing_automation_enabled:
+  name: Mowing Automation Enabled
+  icon: mdi:robot-mower
+
 do_not_mow:
-  name: do not mow
+  name: Do Not Mow
+  icon: mdi:robot-mower-off
+  # Auto-managed by the rain/night automations. Turn on manually to pause all mowing.
 
 block_night_mowing:
   name: Block Night Mowing

@@ -1,15 +1,12 @@
-input_text:
-  reason_no_mow:
-    name: Reason No Mow
-    initial: ""
-    max: 100
+# Small text helpers used for dashboard display.
+# Add under   input_text: !include input_text.yaml   in configuration.yaml
 
-  last_selected_scene:
-    name: Last Selected Scene
-    initial: ""
-    max: 100
+reason_no_mow:
+  name: Reason No Mow
+  initial: ""
+  max: 100
 
-  last_lawn_mowed:
-    name: Last Lawn Mowed
-    initial: ""
-    max: 100
+last_lawn_mowed:
+  name: Last Lawn Mowed
+  initial: ""
+  max: 100

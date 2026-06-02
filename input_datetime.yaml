@@ -1,93 +1,60 @@
-# Bottom Grass
-bottom_grass_last_mow_1:
-  name: "Bottom Grass Last Mow 1"
-  has_date: true
-  has_time: true
-  icon: mdi:grass
-bottom_grass_last_mow_2:
-  name: "Bottom Grass Last Mow 2"
-  has_date: true
-  has_time: true
-  icon: mdi:grass
-bottom_grass_last_mow_3:
-  name: "Bottom Grass Last Mow 3"
-  has_date: true
-  has_time: true
-  icon: mdi:grass
+# Per-zone scheduling state.
+# Add under   input_datetime: !include input_datetime.yaml   in configuration.yaml
+#
+# For each lawn:
+#   <lawn>_next_time      = when the scheduler will next try to mow this zone
+#   <lawn>_last_mow_1/2/3 = rolling history of the last three mows (1 = most recent)
 
-# Golf Lawn
-golf_lawn_last_mow_1:
-  name: "Golf Lawn Last Mow 1"
+# Lawn 1
+lawn_1_next_time:
+  name: Lawn 1 Next Mow
   has_date: true
   has_time: true
-  icon: mdi:golf
-golf_lawn_last_mow_2:
-  name: "Golf Lawn Last Mow 2"
+lawn_1_last_mow_1:
+  name: Lawn 1 Last Mow 1
   has_date: true
   has_time: true
-  icon: mdi:golf
-golf_lawn_last_mow_3:
-  name: "Golf Lawn Last Mow 3"
+lawn_1_last_mow_2:
+  name: Lawn 1 Last Mow 2
   has_date: true
   has_time: true
-  icon: mdi:golf
-
-# Path to Top
-path_to_top_last_mow_1:
-  name: "Path to Top Last Mow 1"
-  has_date: true
-  has_time: true
-  icon: mdi:road-variant
-path_to_top_last_mow_2:
-  name: "Path to Top Last Mow 2"
-  has_date: true
-  has_time: true
-  icon: mdi:road-variant
-path_to_top_last_mow_3:
-  name: "Path to Top Last Mow 3"
-  has_date: true
-  has_time: true
-  icon: mdi:road-variant
-
-# Top Lawn
-top_lawn_last_mow_1:
-  name: "Top Lawn Last Mow 1"
-  has_date: true
-  has_time: true
-  icon: mdi:nature-people
-top_lawn_last_mow_2:
-  name: "Top Lawn Last Mow 2"
-  has_date: true
-  has_time: true
-  icon: mdi:nature-people
-top_lawn_last_mow_3:
-  name: "Top Lawn Last Mow 3"
-  has_date: true
-  has_time: true
-  icon: mdi:nature-people
-
-# Times for mowing 
-back_lawn_next_time:
-  name: Back Lawn Mow Time
+lawn_1_last_mow_3:
+  name: Lawn 1 Last Mow 3
   has_date: true
   has_time: true
 
-bottom_grass_next_time:
-  name: Bottom Grass Mow Time
+# Lawn 2
+lawn_2_next_time:
+  name: Lawn 2 Next Mow
+  has_date: true
+  has_time: true
+lawn_2_last_mow_1:
+  name: Lawn 2 Last Mow 1
+  has_date: true
+  has_time: true
+lawn_2_last_mow_2:
+  name: Lawn 2 Last Mow 2
+  has_date: true
+  has_time: true
+lawn_2_last_mow_3:
+  name: Lawn 2 Last Mow 3
   has_date: true
   has_time: true
 
-golf_lawn_next_time:
-  name: Golf Lawn Mow Time
+# Lawn 3
+lawn_3_next_time:
+  name: Lawn 3 Next Mow
   has_date: true
   has_time: true
-
-path_to_top_next_time:
-  name: Path to Top Mow Time
+lawn_3_last_mow_1:
+  name: Lawn 3 Last Mow 1
   has_date: true
   has_time: true
-
-top_lawn_next_time:
-  name: Top Lawn Mow Time
+lawn_3_last_mow_2:
+  name: Lawn 3 Last Mow 2
+  has_date: true
+  has_time: true
+lawn_3_last_mow_3:
+  name: Lawn 3 Last Mow 3
   has_date: true
   has_time: true
