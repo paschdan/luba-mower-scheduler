@@ -10,7 +10,7 @@ A rain-aware, per-zone mowing scheduler for Mammotion robot mowers (Luba / Luba 
 - Live GPS map of the mower, no extra hardware needed
 
 Full write-up and background:
-[Fully Automated Scheduler for My Luba Mower in Home Assistant](https://peterblandford.com/blog/2025/04/19/fully-automated-scheduler-for-my-luba-mower-in-home-assistant/)
+[Luba Mower Home Assistant Scheduler, the 2026 update](https://peterblandford.com/blog/2026/06/02/luba-mower-home-assistant-scheduler-v2/)
 
 ---
 
