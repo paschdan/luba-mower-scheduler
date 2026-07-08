@@ -1,15 +1,22 @@
-# Example Lovelace view for the mower scheduler.
+# =============================================================================
+# Luba Mower dashboard view
+# =============================================================================
+# Built-in Lovelace cards only — no HACS card required.
 #
-# Uses only BUILT-IN cards (no HACS card required). Add it as a new dashboard
-# view: Settings > Dashboards > (your dashboard) > Edit > raw configuration
-# editor, then paste this under `views:`. Or paste individual cards via the UI.
+# Add as a new dashboard view:
+#   Settings > Dashboards > (your dashboard) > Edit > raw configuration editor,
+# then paste the block below under `views:`.
 #
 # Replace the placeholder entities with yours:
-#   lawn_mower.mower            -> your mower
+#   lawn_mower.mower            -> your mower entity
 #   sensor.mower_battery        -> your mower battery sensor
-#   device_tracker.mower        -> your mower GPS tracker (provided by the integration)
+#   device_tracker.mower        -> your mower GPS tracker (from the integration)
 #   camera.mower                -> your mower camera (Luba 2/3 with camera; optional)
-#   button.mower_lawn_1/2/3     -> your saved-task buttons (optional manual-mow buttons)
+#   button.mower_lawn_1/2       -> your saved-task buttons (optional manual-mow)
+#
+# ADDING A ZONE: copy any `Lawn N` `entities` block, bump the number in every
+# entity_id, and update `perform_action` to pass the new zone via script fields.
+# =============================================================================
 
 title: Mower
 path: mower
@@ -39,7 +46,7 @@ cards:
       - entity: input_text.last_lawn_mowed
         name: Last lawn
 
-  # ---- Live map (built-in map card, auto-centres on the mower) -------------
+  # ---- Live map (built-in map card, auto-centres on the mower) ------------
   - type: map
     title: Mower Location
     entities:
@@ -68,7 +75,11 @@ cards:
         icon: mdi:robot-mower
         tap_action:
           action: perform-action
-          perform_action: script.mow_lawn_1
+          perform_action: script.mow_lawn
+          data:
+            lawn_number: 1
+            lawn_button: button.mower_lawn_1
+            lawn_label: Lawn 1
 
   - type: entities
     title: Lawn 2
@@ -84,20 +95,8 @@ cards:
         icon: mdi:robot-mower
         tap_action:
           action: perform-action
-          perform_action: script.mow_lawn_2
-
-  - type: entities
-    title: Lawn 3
-    entities:
-      - entity: input_select.lawn_3_schedule
-        name: Frequency
-      - entity: input_datetime.lawn_3_next_time
-        name: Next mow
-      - entity: sensor.lawn_3_days_since_mow
-        name: Days since mow
-      - type: button
-        name: Mow Lawn 3 now
-        icon: mdi:robot-mower
-        tap_action:
-          action: perform-action
-          perform_action: script.mow_lawn_3
+          perform_action: script.mow_lawn
+          data:
+            lawn_number: 2
+            lawn_button: button.mower_lawn_2
+            lawn_label: Lawn 2

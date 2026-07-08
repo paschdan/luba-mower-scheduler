@@ -1,0 +1,446 @@
+# =============================================================================
+# Luba Mower Smart Scheduler — Home Assistant package
+# =============================================================================
+# Rain-aware, per-zone mowing scheduler for Mammotion robot mowers (Luba /
+# Luba 2 / Luba 3). Single-file drop-in via the `packages` include.
+#
+# INSTALL
+# -------
+# 1. In configuration.yaml, enable packages once (if you haven't already):
+#
+#      homeassistant:
+#        packages: !include_dir_named packages
+#
+# 2. Drop this file into  <config>/packages/luba_mower_scheduler.yaml
+# 3. Restart Home Assistant.
+# 4. Rename the placeholder entities below to match yours (see PLACEHOLDERS).
+#
+# PLACEHOLDERS
+# ------------
+# Search-and-replace within THIS file before restarting:
+#
+#   lawn_mower.mower           -> your mower entity (Dev Tools > States, `lawn_mower.`)
+#   button.mower_lawn_1        -> saved-task button for zone 1 (Mammotion app task)
+#   button.mower_lawn_2        -> saved-task button for zone 2
+#
+# The rain sensors (sensor.rain_today, sensor.rain_probability) are OPTIONAL.
+# If they don't exist, `| float(0)` makes rain delay a no-op — safe to leave.
+# To wire your weather integration, uncomment the two template sensors at the
+# bottom of this file and point them at your entities.
+#
+# WHAT'S IN HERE
+# --------------
+# - 3 input_boolean, 2 input_select, 8 input_datetime, 2 input_text helpers
+# - 2 "days since mow" template sensors
+# - 1 parameterized mow script (mow_lawn) — reused for every zone
+# - 1 consolidated scheduler automation (multiple triggers, one code path)
+# - 4 rain/night automations (rain on, rain clear, night on, morning clear)
+#
+# ADDING A ZONE
+# -------------
+# 1. Add lawn_N_schedule (input_select) + lawn_N_next_time & lawn_N_last_mow_1..3
+#    (input_datetime) blocks below, mirroring lawn_1.
+# 2. Add a "Lawn N Days Since Mow" template sensor.
+# 3. Add `- platform: time` `  at: input_datetime.lawn_N_next_time` to the
+#    scheduler automation, with a matching `id: lawn_N`.
+# 4. Add a `lawn_N:` block to the `variables:` list of the scheduler.
+# 5. Add a card to dashboard.yaml pointing at the new helpers.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# HELPERS: on/off gates
+# -----------------------------------------------------------------------------
+input_boolean:
+  mowing_automation_enabled:
+    name: Mowing Automation Enabled
+    icon: mdi:robot-mower
+
+  do_not_mow:
+    name: Do Not Mow
+    icon: mdi:robot-mower-off
+    # Auto-managed by rain/night automations. Turn on manually to pause all mowing.
+
+  block_night_mowing:
+    name: Block Night Mowing
+    icon: mdi:weather-night
+
+
+# -----------------------------------------------------------------------------
+# HELPERS: per-zone frequency
+# -----------------------------------------------------------------------------
+input_select:
+  lawn_1_schedule:
+    name: Lawn 1 Schedule
+    options:
+      - never
+      - once per week
+      - twice per week
+    initial: never
+    icon: mdi:calendar-clock
+
+  lawn_2_schedule:
+    name: Lawn 2 Schedule
+    options:
+      - never
+      - once per week
+      - twice per week
+    initial: never
+    icon: mdi:calendar-clock
+
+
+# -----------------------------------------------------------------------------
+# HELPERS: per-zone scheduling state
+#   <lawn>_next_time      = when the scheduler will next try to mow this zone
+#   <lawn>_last_mow_1/2/3 = rolling history of the last three mows (1 = newest)
+# -----------------------------------------------------------------------------
+input_datetime:
+  lawn_1_next_time:
+    name: Lawn 1 Next Mow
+    has_date: true
+    has_time: true
+  lawn_1_last_mow_1:
+    name: Lawn 1 Last Mow 1
+    has_date: true
+    has_time: true
+  lawn_1_last_mow_2:
+    name: Lawn 1 Last Mow 2
+    has_date: true
+    has_time: true
+  lawn_1_last_mow_3:
+    name: Lawn 1 Last Mow 3
+    has_date: true
+    has_time: true
+
+  lawn_2_next_time:
+    name: Lawn 2 Next Mow
+    has_date: true
+    has_time: true
+  lawn_2_last_mow_1:
+    name: Lawn 2 Last Mow 1
+    has_date: true
+    has_time: true
+  lawn_2_last_mow_2:
+    name: Lawn 2 Last Mow 2
+    has_date: true
+    has_time: true
+  lawn_2_last_mow_3:
+    name: Lawn 2 Last Mow 3
+    has_date: true
+    has_time: true
+
+
+# -----------------------------------------------------------------------------
+# HELPERS: dashboard-facing text
+# -----------------------------------------------------------------------------
+input_text:
+  reason_no_mow:
+    name: Reason No Mow
+    initial: ""
+    max: 100
+
+  last_lawn_mowed:
+    name: Last Lawn Mowed
+    initial: ""
+    max: 100
+
+
+# -----------------------------------------------------------------------------
+# TEMPLATE SENSORS: "days since last mow" per zone
+#
+# Optional rain sensors (sensor.rain_today mm, sensor.rain_probability %) are
+# commented at the bottom — uncomment and point at your weather integration
+# to enable rain delay.
+# -----------------------------------------------------------------------------
+template:
+  - sensor:
+      - name: "Lawn 1 Days Since Mow"
+        unique_id: lawn_1_days_since_mow
+        unit_of_measurement: "d"
+        icon: mdi:calendar-check
+        state: >
+          {% set ts = state_attr('input_datetime.lawn_1_last_mow_1', 'timestamp') %}
+          {% if ts %}{{ ((now().timestamp() - ts) / 86400) | round(0) | int }}{% else %}unknown{% endif %}
+
+      - name: "Lawn 2 Days Since Mow"
+        unique_id: lawn_2_days_since_mow
+        unit_of_measurement: "d"
+        icon: mdi:calendar-check
+        state: >
+          {% set ts = state_attr('input_datetime.lawn_2_last_mow_1', 'timestamp') %}
+          {% if ts %}{{ ((now().timestamp() - ts) / 86400) | round(0) | int }}{% else %}unknown{% endif %}
+
+  # --- OPTIONAL rain sensors -------------------------------------------------
+  # Uncomment and rename to match your weather integration to enable rain delay.
+  # Example uses core OpenWeatherMap sensors.
+  #
+  # - sensor:
+  #     - name: "Rain Today"
+  #       unique_id: rain_today
+  #       unit_of_measurement: "mm"
+  #       state: "{{ states('sensor.openweathermap_forecast_precipitation') | float(0) }}"
+  #     - name: "Rain Probability"
+  #       unique_id: rain_probability
+  #       unit_of_measurement: "%"
+  #       state: "{{ states('sensor.openweathermap_forecast_precipitation_probability') | float(0) }}"
+
+
+# -----------------------------------------------------------------------------
+# SCRIPT: single parameterized mow (used for every zone)
+#
+# Presses the saved-task button for the given zone and rolls the history +
+# reschedules the next run based on the zone's input_select.
+#
+# The saved-task button runs the mowing task you configured in the Mammotion
+# app (cutting angle, speed, blade height, edge mode). To retune, edit the
+# task IN THE APP — do not add parameters here.
+# -----------------------------------------------------------------------------
+script:
+  mow_lawn:
+    alias: Mow Lawn (parameterized)
+    icon: mdi:robot-mower
+    mode: parallel
+    max: 5
+    fields:
+      lawn_number:
+        description: "Zone number (1, 2, ...)"
+        example: "1"
+        selector:
+          number:
+            min: 1
+            max: 9
+            mode: box
+      lawn_button:
+        description: "Saved-task button entity_id for this zone"
+        example: "button.mower_lawn_1"
+        selector:
+          entity:
+            domain: button
+      lawn_label:
+        description: "Human-readable label for dashboards / notifications"
+        example: "Lawn 1"
+        selector:
+          text:
+    sequence:
+      # 1. Skip if the mower is already out.
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: lawn_mower.mower
+            state: mowing
+          - condition: state
+            entity_id: lawn_mower.mower
+            state: returning
+
+      # 2. Bind per-zone entity_ids we'll reuse in the sequence below.
+      - variables:
+          e_last_1: "input_datetime.lawn_{{ lawn_number }}_last_mow_1"
+          e_last_2: "input_datetime.lawn_{{ lawn_number }}_last_mow_2"
+          e_last_3: "input_datetime.lawn_{{ lawn_number }}_last_mow_3"
+          e_next:  "input_datetime.lawn_{{ lawn_number }}_next_time"
+          e_sched: "input_select.lawn_{{ lawn_number }}_schedule"
+
+      # 3. Roll last-mow history (3 <- 2, 2 <- 1, 1 <- now).
+      - action: input_datetime.set_datetime
+        target: { entity_id: "{{ e_last_3 }}" }
+        data:   { datetime: "{{ states(e_last_2) }}" }
+      - action: input_datetime.set_datetime
+        target: { entity_id: "{{ e_last_2 }}" }
+        data:   { datetime: "{{ states(e_last_1) }}" }
+      - action: input_datetime.set_datetime
+        target: { entity_id: "{{ e_last_1 }}" }
+        data:   { datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}" }
+
+      # 4. Record which lawn just started.
+      - action: input_text.set_value
+        target: { entity_id: input_text.last_lawn_mowed }
+        data:   { value: "{{ lawn_label }}" }
+
+      # 5. Fire the saved-task button.
+      - action: button.press
+        target: { entity_id: "{{ lawn_button }}" }
+
+      # 6. Reschedule next run based on the zone's chosen frequency.
+      - action: input_datetime.set_datetime
+        target: { entity_id: "{{ e_next }}" }
+        data:
+          datetime: >
+            {% set freq = states(e_sched) %}
+            {% if freq == 'once per week' %}
+              {{ (now() + timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S') }}
+            {% elif freq == 'twice per week' %}
+              {{ (now() + timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S') }}
+            {% else %}
+              {{ (now() + timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S') }}
+            {% endif %}
+
+
+# -----------------------------------------------------------------------------
+# AUTOMATIONS
+#
+# 1x consolidated scheduler (all zones)  +  4x rain/night helpers.
+# -----------------------------------------------------------------------------
+automation:
+  # ---------------------------------------------------------------------------
+  # Consolidated per-zone scheduler.
+  #
+  # One automation per zone would work; using trigger.id lets us have a single
+  # code path with per-zone bindings. Adding a zone = adding one more `time`
+  # trigger + one entry to the `variables.zones` map.
+  # ---------------------------------------------------------------------------
+  - id: luba_mower_scheduler
+    alias: Luba Mower Scheduler
+    mode: parallel
+    max: 5
+    trigger:
+      - platform: time
+        at: input_datetime.lawn_1_next_time
+        id: lawn_1
+      - platform: time
+        at: input_datetime.lawn_2_next_time
+        id: lawn_2
+    condition:
+      - condition: state
+        entity_id: input_boolean.mowing_automation_enabled
+        state: "on"
+    variables:
+      # Map trigger.id -> the entity IDs that zone owns.
+      # Add a block here when you add a zone.
+      zones:
+        lawn_1:
+          number: 1
+          label: "Lawn 1"
+          button: button.mower_lawn_1
+          schedule: input_select.lawn_1_schedule
+          next_time: input_datetime.lawn_1_next_time
+        lawn_2:
+          number: 2
+          label: "Lawn 2"
+          button: button.mower_lawn_2
+          schedule: input_select.lawn_2_schedule
+          next_time: input_datetime.lawn_2_next_time
+      z: "{{ zones[trigger.id] }}"
+    action:
+      - choose:
+          # Happy path: nothing blocking, so mow.
+          - conditions:
+              - condition: state
+                entity_id: input_boolean.do_not_mow
+                state: "off"
+              - condition: template
+                # Native-friendly: schedule != 'never' and mower is idle.
+                # (Kept as one template because both parts depend on `z`.)
+                value_template: >
+                  {{ states(z.schedule) != 'never'
+                     and states('lawn_mower.mower') not in ['mowing', 'returning'] }}
+            sequence:
+              - action: script.mow_lawn
+                data:
+                  lawn_number: "{{ z.number }}"
+                  lawn_button: "{{ z.button }}"
+                  lawn_label:  "{{ z.label }}"
+        # Blocked path: push next_time forward by 1h; if that lands in the
+        # dusk window, jump to 2h past sunrise so we don't try overnight.
+        default:
+          - action: input_datetime.set_datetime
+            target: { entity_id: "{{ z.next_time }}" }
+            data:
+              datetime: >
+                {% set t = now() + timedelta(hours=1) %}
+                {% set sunset  = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
+                {% set sunrise = as_timestamp(state_attr('sun.sun', 'next_rising')) %}
+                {% if t.timestamp() >= (sunset - 7200) %}
+                  {{ (sunrise + 7200) | timestamp_custom('%Y-%m-%d %H:%M:%S', true) }}
+                {% else %}
+                  {{ t.strftime('%Y-%m-%d %H:%M:%S') }}
+                {% endif %}
+
+  # ---------------------------------------------------------------------------
+  # Rain delay (optional — needs sensor.rain_today + sensor.rain_probability;
+  # with no rain sensors these simply never trigger).
+  # ---------------------------------------------------------------------------
+  - id: do_not_mow_if_rain
+    alias: Do Not Mow if Rain
+    mode: restart
+    trigger:
+      - platform: time_pattern
+        minutes: "/30"
+    condition:
+      - condition: template
+        value_template: >
+          {{ states('sensor.rain_today') | float(0) > 3
+             or states('sensor.rain_probability') | float(0) > 50 }}
+    action:
+      - action: input_boolean.turn_on
+        target: { entity_id: input_boolean.do_not_mow }
+      - action: input_text.set_value
+        target: { entity_id: input_text.reason_no_mow }
+        data:
+          value: >
+            {% if states('sensor.rain_today') | float(0) > 3 %}wet ground{% else %}rain soon{% endif %}
+
+  - id: reset_do_not_mow_if_dry
+    alias: Reset Do Not Mow if Dry
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/30"
+    condition:
+      # Template (not numeric_state) so a MISSING rain sensor reads as 0/"dry",
+      # matching the original behavior where "no rain sensors = never triggers
+      # rain delay, but also never blocks the auto-clear".
+      - condition: template
+        value_template: >
+          {{ states('sensor.rain_today') | float(0) <= 3
+             and states('sensor.rain_probability') | float(0) <= 50 }}
+      # Only auto-clear during the day, so the night block below isn't undone.
+      - condition: sun
+        after: sunrise
+        after_offset: "01:00:00"
+        before: sunset
+        before_offset: "-01:00:00"
+    action:
+      - action: input_boolean.turn_off
+        target: { entity_id: input_boolean.do_not_mow }
+
+  # ---------------------------------------------------------------------------
+  # Night block (optional — gated by input_boolean.block_night_mowing).
+  # ---------------------------------------------------------------------------
+  - id: block_mowing_at_night
+    alias: Block Mowing at Night
+    mode: single
+    trigger:
+      - platform: sun
+        event: sunset
+        offset: "-01:00:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.block_night_mowing
+        state: "on"
+    action:
+      - action: input_boolean.turn_on
+        target: { entity_id: input_boolean.do_not_mow }
+      - action: input_text.set_value
+        target: { entity_id: input_text.reason_no_mow }
+        data: { value: night time }
+
+  - id: allow_mowing_at_sunrise
+    alias: Allow Mowing at Sunrise
+    mode: single
+    trigger:
+      - platform: sun
+        event: sunrise
+        offset: "01:00:00"
+    condition:
+      - condition: state
+        entity_id: input_boolean.block_night_mowing
+        state: "on"
+      # Template (see reset_do_not_mow_if_dry) so a MISSING rain sensor
+      # counts as "dry" and doesn't strand do_not_mow.
+      - condition: template
+        value_template: >
+          {{ states('sensor.rain_today') | float(0) <= 3
+             and states('sensor.rain_probability') | float(0) <= 50 }}
+    action:
+      - action: input_boolean.turn_off
+        target: { entity_id: input_boolean.do_not_mow }
