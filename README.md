@@ -1,135 +1,71 @@
-# Luba Mower Smart Scheduler for Home Assistant (packaged)
+# Luba Mower Smart Scheduler — paschdan live install
 
-A rain-aware, per-zone mowing scheduler for Mammotion robot mowers (Luba / Luba 2 / Luba 3 and similar), built entirely in Home Assistant — packaged as **one drop-in YAML** so you only manage one file.
+> This is the **`personal/paschdan-live`** branch. All placeholder entities are replaced with the real ones from paschdan's Home Assistant instance. If you want the generic template, use [`main`](https://github.com/paschdan/luba-mower-scheduler/tree/main) or the upstream [shawwellpete/luba-mower-scheduler](https://github.com/shawwellpete/luba-mower-scheduler).
 
-- Schedule each lawn/zone independently (once or twice a week)
-- Automatically delays mowing when it is raining or rain is forecast
-- Optional night block so the mower never goes out after dusk
-- Retries automatically when conditions clear
-- Simple dashboard using only built-in cards (no custom card required)
-- Live GPS map of the mower, no extra hardware needed
+## Wiring in this branch
 
-This is a fork of [shawwellpete/luba-mower-scheduler](https://github.com/shawwellpete/luba-mower-scheduler) restructured as a Home Assistant **package**:
+| Role | Entity |
+|---|---|
+| Mower | `lawn_mower.yuka_mnu7nps5` (Mammotion Yuka) |
+| Zone 1 button ("Garten") | `button.garten_yuka_mnu7nps5_aufgabe_1` |
+| Zone 2 button ("Seite") | `button.garten_yuka_mnu7nps5_aufgabe_3` |
+| Rain source | `weather.forecast_home` (Met.no), pulled via `weather.get_forecasts` |
+| Battery | `sensor.yuka_mnu7nps5_battery` |
+| GPS | `device_tracker.yuka_mnu7nps5_yuka_mnu7nps5` |
+| Camera | `camera.yuka_mnu7nps5_none` |
 
-- All helpers, template sensors, scripts, and automations live in **one file**: [`packages/luba_mower_scheduler.yaml`](./packages/luba_mower_scheduler.yaml).
-- The dashboard remains its own file: [`dashboard.yaml`](./dashboard.yaml).
-- The three per-zone schedulers were consolidated into **one automation** using `trigger.id`, and the three mow scripts became **one parameterized `script.mow_lawn`**. Adding a zone is now ~10 lines instead of ~60.
-- Ships with **2 zones** (Lawn 1, Lawn 2). See "Adding a zone" below to extend.
+## Files
 
-The runtime behavior (scheduling, rain delay, night block, retry-past-dusk, history rolling) is identical to upstream. Entity IDs are unchanged for the ones that overlap, so a migration is a straight swap.
+- [`packages/luba_mower_scheduler.yaml`](./packages/luba_mower_scheduler.yaml) — everything (helpers, template sensors, script, automations). Drop into `<config>/packages/`.
+- [`dashboard.yaml`](./dashboard.yaml) — Lovelace view. Paste into a dashboard via raw config editor.
 
-Full background on the upstream project:
-[Luba Mower Home Assistant Scheduler, the 2026 update](https://peterblandford.com/blog/2026/06/02/luba-mower-home-assistant-scheduler-v2/)
+## Install
 
----
+1. Ensure `configuration.yaml` has:
+   ```yaml
+   homeassistant:
+     packages: !include_dir_named packages
+   ```
+2. Copy `packages/luba_mower_scheduler.yaml` to `<config>/packages/luba_mower_scheduler.yaml`.
+3. Restart Home Assistant.
+4. In **Settings > Dashboards**, open the raw editor of your dashboard and paste `dashboard.yaml` under `views:`.
+5. Turn on `Mowing Automation Enabled`, pick a schedule per zone (`Garten Schedule` / `Seite Schedule`), and set each zone's `Next Mow` to a future time.
 
-## Requirements
+## What's different vs. `main`
 
-| Component | Required? | Where |
+| | `main` (generic) | `personal/paschdan-live` (this branch) |
 |---|---|---|
-| [Mammotion Home Assistant integration](https://github.com/mikey0000/Mammotion-HA) | Yes | HACS (custom repository) |
-| A weather integration providing rainfall + probability | Optional (for rain delay) | e.g. core [OpenWeatherMap](https://www.home-assistant.io/integrations/openweathermap/) |
+| Zone naming | `lawn_1` / `lawn_2` | `garten` / `seite` (matches your mower app tasks) |
+| Mower entity | placeholder `lawn_mower.mower` | real `lawn_mower.yuka_mnu7nps5` |
+| Button entities | placeholder `button.mower_lawn_N` | `button.garten_yuka_mnu7nps5_aufgabe_1` / `_3` |
+| Rain sensors | commented-out OpenWeatherMap template stub | live trigger-based template from `weather.forecast_home` (Met.no) |
+| Camera/GPS entities in dashboard | placeholders | real Yuka entities |
+| Dashboard labels | English "Lawn 1" / "Lawn 2" | German "Garten" / "Seite" |
 
-The example dashboard uses **built-in Lovelace cards only**, so no Mushroom / map-card / camera-agora-card is needed.
+## Rain semantics
 
-### Before you start: create your mowing tasks in the Mammotion app
+Met.no's hourly forecast has `precipitation` (mm) but **no** `precipitation_probability` field. To keep the two-signal rain check working, `sensor.rain_probability` is derived as *"fraction of today's remaining forecast hours that have any predicted precipitation, 0-100"*. So a forecast where 3 of the remaining 12 hours today have rain would give `rain_probability: 25`.
 
-This scheduler triggers tasks you have already saved in the Mammotion app. For each lawn/zone:
+The scheduler blocks mowing when EITHER:
+- `sensor.rain_today` > 3 mm (predicted rain today, total)
+- `sensor.rain_probability` > 50% (more than half of today's remaining hours are wet)
 
-1. In the Mammotion app, create and save a mowing task for that area (set the cutting angle, speed, blade height, edge mode, etc.).
-2. After the integration syncs, that task appears in Home Assistant as a button, e.g. `button.mower_lawn_1`. Find it in **Developer Tools > States** (search `button.`).
+Both signals refresh every 30 minutes and at HA startup.
 
-If a button does not exist for a zone, the scheduler cannot mow it, create the task in the app first.
+## Interaction with `automation.mower_paused_continue`
 
----
+You already have a separate automation, "Mower - Smart Restart and Reset", which handles stuck retries independently. It watches `sensor.yuka_mnu7nps5_activity_mode` for `MODE_PAUSE` and retries via `lawn_mower.start_mowing` up to 3× per stuck event using `input_number.mower_retry_count`.
 
-## Installation
-
-### 1. Enable packages in `configuration.yaml` (once)
-
-If you don't already have this line, add it:
-
-```yaml
-homeassistant:
-  packages: !include_dir_named packages
-```
-
-### 2. Drop the package file in
-
-Copy [`packages/luba_mower_scheduler.yaml`](./packages/luba_mower_scheduler.yaml) into your Home Assistant config:
-
-```
-<config>/packages/luba_mower_scheduler.yaml
-```
-
-That's it — no other `!include` lines. The package provides all `input_boolean`, `input_select`, `input_datetime`, `input_text`, `template`, `script`, and `automation` entries in one file.
-
-### 3. Rename the placeholder entities
-
-Open `packages/luba_mower_scheduler.yaml` and search-and-replace:
-
-- `lawn_mower.mower` → your mower entity (Developer Tools > States, search `lawn_mower.`)
-- `button.mower_lawn_1` → your saved-task button for zone 1
-- `button.mower_lawn_2` → your saved-task button for zone 2
-
-Do the same in [`dashboard.yaml`](./dashboard.yaml) for the mower/camera/tracker entities.
-
-### 4. Restart Home Assistant
-
-(or Developer Tools → YAML → **Check Configuration** first if you want a preflight.)
-
-### 5. Add the dashboard
-
-Open [`dashboard.yaml`](./dashboard.yaml) and paste it into a new dashboard view: **Settings → Dashboards → (your dashboard) → Edit → raw configuration editor**, under `views:`.
-
-### 6. Set it running
-
-Turn on **Mowing Automation Enabled**, choose a frequency per zone, and set each zone's **Next Mow** to a future date/time. The scheduler fires at that time and reschedules itself.
-
----
-
-## How it works
-
-- Each zone has a **Next Mow** time (`input_datetime.lawn_X_next_time`) and a **Frequency** (`input_select.lawn_X_schedule`).
-- The single **Luba Mower Scheduler** automation has one `time` trigger per zone (each with a `trigger.id`). When it fires, it looks up the zone's entities from a `variables.zones` map and either runs `script.mow_lawn` (with the zone's parameters) or pushes the next-time forward by 1 hour if something is blocking (rain, night, mower busy). If the retry would land in the dusk window, it jumps to two hours past sunrise instead.
-- `script.mow_lawn` presses the zone's saved-task button, rolls the last-mow history, and reschedules the next run based on the zone's frequency (+7 days for once a week, +3 days for twice a week).
-- **Rain delay** (optional): `do_not_mow` turns on when `sensor.rain_today` > 3 mm or `sensor.rain_probability` > 50%, and clears when it is dry. Wire the two commented-out template sensors at the bottom of the package to your weather integration to enable this. With no rain sensors, rain delay simply never triggers.
-- **Night block** (optional): with **Block Night Mowing** on, `do_not_mow` turns on an hour before sunset and clears an hour after sunrise.
-
----
+That automation does not overlap with this scheduler: our scheduler triggers on `input_datetime` time triggers and calls `button.press` on the saved-task button; the stuck-retry automation triggers on activity_mode state changes and calls `lawn_mower.start_mowing`. Both can coexist safely, and together they give you scheduled starts + resilience against pauses/stucks.
 
 ## Adding a zone
 
-For each new zone `N`:
-
-1. In [`packages/luba_mower_scheduler.yaml`](./packages/luba_mower_scheduler.yaml):
-   - Add a `lawn_N_schedule` block under `input_select:`.
-   - Add `lawn_N_next_time` + `lawn_N_last_mow_1/2/3` blocks under `input_datetime:`.
-   - Add a `"Lawn N Days Since Mow"` sensor under the first `template:` list item.
-   - Under the `luba_mower_scheduler` automation:
-     - Add another `- platform: time` trigger pointing at `input_datetime.lawn_N_next_time`, with `id: lawn_N`.
-     - Add a `lawn_N:` entry to `variables.zones` mirroring the existing entries.
-2. In [`dashboard.yaml`](./dashboard.yaml): copy any `Lawn N` `entities` card and update entity IDs + the `script.mow_lawn` `data:` block.
+1. Add `<zone>_schedule` under `input_select:`.
+2. Add `<zone>_next_time` + `<zone>_last_mow_1/2/3` under `input_datetime:`.
+3. Add a `"<Zone> Days Since Mow"` sensor to the first `template:` list item.
+4. In the `luba_mower_scheduler` automation:
+   - Add a `- platform: time` trigger with `id: <zone>` and `at: input_datetime.<zone>_next_time`.
+   - Add a `<zone>:` entry to `variables.zones` mirroring the existing ones.
+5. Add a card block to `dashboard.yaml` calling `script.mow_lawn` with the new zone's `data:` values.
 
 No new script or automation is needed — both are already parameterized.
-
----
-
-## FAQ
-
-**How do I get the mower's GPS / map? Do I need a tracker or tag?**
-No extra hardware. The Mammotion integration already provides a `device_tracker.<mower>` entity from the mower's own GPS. The built-in `map` card in `dashboard.yaml` shows it and auto-centres, no coordinates to configure.
-
-**Where do I get the camera card?**
-You don't need a custom card any more. The dashboard uses the built-in `picture-entity` card pointed at your `camera.<mower>` entity (Luba models with a camera). Remove that card if your model has no camera.
-
-**Can it drive two mowers?**
-Yes, as an advanced setup: duplicate the helpers/scripts/automations per mower (or add an `input_select` per zone to choose the mower), and have each zone's scheduler check its assigned mower's state. This project ships single-mower to keep it simple.
-
----
-
-## Credits
-
-Forked from [shawwellpete/luba-mower-scheduler](https://github.com/shawwellpete/luba-mower-scheduler) — original design and logic by Peter Blandford.
-
-Built on top of the excellent [Mammotion Home Assistant integration](https://github.com/mikey0000/Mammotion-HA) by Michael Arthur.

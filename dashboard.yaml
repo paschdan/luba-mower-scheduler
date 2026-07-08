@@ -1,102 +1,111 @@
 # =============================================================================
-# Luba Mower dashboard view
+# Luba Mower dashboard view  (paschdan live install)
 # =============================================================================
-# Built-in Lovelace cards only — no HACS card required.
+# Pre-wired against the actual entities in this HA instance:
+#
+#   Mower       : lawn_mower.yuka_mnu7nps5
+#   Battery     : sensor.yuka_mnu7nps5_battery
+#   Tracker     : device_tracker.yuka_mnu7nps5_yuka_mnu7nps5
+#   Camera      : camera.yuka_mnu7nps5_none
+#   Buttons     : button.garten_yuka_mnu7nps5_aufgabe_1  (Garten)
+#                 button.garten_yuka_mnu7nps5_aufgabe_3  (Seite)
 #
 # Add as a new dashboard view:
 #   Settings > Dashboards > (your dashboard) > Edit > raw configuration editor,
 # then paste the block below under `views:`.
-#
-# Replace the placeholder entities with yours:
-#   lawn_mower.mower            -> your mower entity
-#   sensor.mower_battery        -> your mower battery sensor
-#   device_tracker.mower        -> your mower GPS tracker (from the integration)
-#   camera.mower                -> your mower camera (Luba 2/3 with camera; optional)
-#   button.mower_lawn_1/2       -> your saved-task buttons (optional manual-mow)
-#
-# ADDING A ZONE: copy any `Lawn N` `entities` block, bump the number in every
-# entity_id, and update `perform_action` to pass the new zone via script fields.
 # =============================================================================
 
-title: Mower
-path: mower
+title: Mäher
+path: maeher
 icon: mdi:robot-mower
 cards:
   # ---- Controls -----------------------------------------------------------
   - type: entities
-    title: Mowing Controls
+    title: Mow Controls
     entities:
       - entity: input_boolean.mowing_automation_enabled
-        name: Scheduler enabled
+        name: Scheduler aktiv
       - entity: input_boolean.do_not_mow
-        name: Do not mow (auto - rain/night)
+        name: Nicht mähen (auto - Regen/Nacht)
       - entity: input_boolean.block_night_mowing
-        name: Block night mowing
+        name: Nachts blockieren
       - entity: input_text.reason_no_mow
-        name: Reason
+        name: Grund
 
   # ---- Mower status -------------------------------------------------------
   - type: glance
-    title: Mower
+    title: Yuka
     entities:
-      - entity: lawn_mower.mower
-        name: State
-      - entity: sensor.mower_battery
-        name: Battery
+      - entity: lawn_mower.yuka_mnu7nps5
+        name: Status
+      - entity: sensor.yuka_mnu7nps5_battery
+        name: Akku
       - entity: input_text.last_lawn_mowed
-        name: Last lawn
+        name: Letzte Fläche
 
   # ---- Live map (built-in map card, auto-centres on the mower) ------------
   - type: map
-    title: Mower Location
+    title: Position
     entities:
-      - device_tracker.mower
+      - device_tracker.yuka_mnu7nps5_yuka_mnu7nps5
     hours_to_show: 24
 
-  # ---- Camera (optional; remove if your model has no camera) --------------
+  # ---- Camera -------------------------------------------------------------
   - type: picture-entity
-    title: Mower Camera
-    entity: camera.mower
+    title: Kamera
+    entity: camera.yuka_mnu7nps5_none
     camera_view: live
     show_state: false
 
-  # ---- Per-zone schedule + manual mow -------------------------------------
+  # ---- Rain (from Met.no template sensors defined in the package) ---------
   - type: entities
-    title: Lawn 1
+    title: Wetter
     entities:
-      - entity: input_select.lawn_1_schedule
-        name: Frequency
-      - entity: input_datetime.lawn_1_next_time
-        name: Next mow
-      - entity: sensor.lawn_1_days_since_mow
-        name: Days since mow
-      - type: button
-        name: Mow Lawn 1 now
-        icon: mdi:robot-mower
-        tap_action:
-          action: perform-action
-          perform_action: script.mow_lawn
-          data:
-            lawn_number: 1
-            lawn_button: button.mower_lawn_1
-            lawn_label: Lawn 1
+      - entity: sensor.rain_today
+        name: Regen heute (mm)
+      - entity: sensor.rain_probability
+        name: Regenwahrscheinlichkeit (max %)
+      - entity: weather.forecast_home
+        name: Vorhersage
 
+  # ---- Garten (zone 1) ----------------------------------------------------
   - type: entities
-    title: Lawn 2
+    title: Garten
     entities:
-      - entity: input_select.lawn_2_schedule
-        name: Frequency
-      - entity: input_datetime.lawn_2_next_time
-        name: Next mow
-      - entity: sensor.lawn_2_days_since_mow
-        name: Days since mow
+      - entity: input_select.garten_schedule
+        name: Häufigkeit
+      - entity: input_datetime.garten_next_time
+        name: Nächster Mähtermin
+      - entity: sensor.garten_days_since_mow
+        name: Tage seit letztem Mähen
       - type: button
-        name: Mow Lawn 2 now
+        name: Garten jetzt mähen
         icon: mdi:robot-mower
         tap_action:
           action: perform-action
           perform_action: script.mow_lawn
           data:
-            lawn_number: 2
-            lawn_button: button.mower_lawn_2
-            lawn_label: Lawn 2
+            zone_slug: garten
+            zone_button: button.garten_yuka_mnu7nps5_aufgabe_1
+            zone_label: Garten
+
+  # ---- Seite (zone 2) -----------------------------------------------------
+  - type: entities
+    title: Seite
+    entities:
+      - entity: input_select.seite_schedule
+        name: Häufigkeit
+      - entity: input_datetime.seite_next_time
+        name: Nächster Mähtermin
+      - entity: sensor.seite_days_since_mow
+        name: Tage seit letztem Mähen
+      - type: button
+        name: Seite jetzt mähen
+        icon: mdi:robot-mower
+        tap_action:
+          action: perform-action
+          perform_action: script.mow_lawn
+          data:
+            zone_slug: seite
+            zone_button: button.garten_yuka_mnu7nps5_aufgabe_3
+            zone_label: Seite
