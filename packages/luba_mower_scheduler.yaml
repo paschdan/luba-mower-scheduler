@@ -321,6 +321,40 @@ script:
           entity_id: "{{ zone_button }}"
 
 
+  # ---------------------------------------------------------------------------
+  # Per-zone wrapper scripts.
+  #
+  # scheduler-card cannot pass service_data to script.* actions, so we expose
+  # one no-argument wrapper per zone. Each wrapper is a thin shim that calls
+  # script.mow_lawn with its hard-coded zone identity. Selecting these in the
+  # card UI adds a schedule that fires the right zone with no room for the
+  # data payload to get lost on a card-level edit.
+  # ---------------------------------------------------------------------------
+  mow_garten:
+    alias: Mow Garten
+    icon: mdi:robot-mower
+    mode: parallel
+    max: 3
+    sequence:
+      - action: script.mow_lawn
+        data:
+          zone_slug: garten
+          zone_button: button.garten_yuka_mnu7nps5_aufgabe_1
+          zone_label: Garten
+
+  mow_seite:
+    alias: Mow Seite
+    icon: mdi:robot-mower
+    mode: parallel
+    max: 3
+    sequence:
+      - action: script.mow_lawn
+        data:
+          zone_slug: seite
+          zone_button: button.garten_yuka_mnu7nps5_aufgabe_3
+          zone_label: Seite
+
+
 # -----------------------------------------------------------------------------
 # AUTOMATIONS
 #

@@ -9,8 +9,24 @@ The pre-scheduler-component version had a per-zone `input_datetime.<zone>_next_t
 That's gone. Instead:
 
 - Each zone is a `switch.schedule_*` entity managed by nielsfaber/scheduler-component. You edit weekdays, times, and behavior via the scheduler-card UI (same card you already use for the watering schedule).
-- The old scheduler automation is deleted. scheduler-component fires `script.mow_lawn` directly at each configured slot.
+- The old scheduler automation is deleted. scheduler-component fires a **per-zone wrapper script** (`script.mow_garten`, `script.mow_seite`) at each configured slot. The wrapper is a thin shim that calls the parameterized `script.mow_lawn` with the zone's hard-coded identity. **Why wrappers?** scheduler-card doesn't let you pass `service_data` in the UI, so a schedule that called `script.mow_lawn` directly would lose its zone params on any card-level edit. Wrappers avoid the problem: the schedule just picks a no-argument script.
 - All the "should I mow right now?" gating (`mowing_automation_enabled` / `do_not_mow` / mower busy) moved into `script.mow_lawn` as up-front conditions — so a scheduled slot that fires while it's raining or the mower is docked simply no-ops. The next scheduled slot re-tries naturally, no manual retry logic needed.
+
+## Script topology
+
+```
+switch.schedule_garten_mahen (Mon/Wed/Fri 11:00)
+  └─ calls script.mow_garten (no arguments)
+       └─ calls script.mow_lawn with hard-coded fields:
+            zone_slug=garten, zone_button=Aufgabe-1, zone_label=Garten
+              └─ guards → history-roll → button.press
+
+switch.schedule_seite_mahen  (Tue/Thu/Sat 11:00)
+  └─ calls script.mow_seite (no arguments)
+       └─ calls script.mow_lawn with hard-coded fields:
+            zone_slug=seite, zone_button=Aufgabe-3, zone_label=Seite
+              └─ guards → history-roll → button.press
+```
 
 ## Wiring in this branch
 
@@ -23,8 +39,8 @@ That's gone. Instead:
 | Battery | `sensor.yuka_mnu7nps5_battery` |
 | GPS | `device_tracker.yuka_mnu7nps5_yuka_mnu7nps5` |
 | Camera | `camera.yuka_mnu7nps5_none` |
-| Garten schedule | `switch.schedule_garten_mahen` (Mon/Wed/Fri 09:00, set via `scheduler.add`) |
-| Seite schedule | `switch.schedule_seite_mahen` (Tue/Sat 09:00, set via `scheduler.add`) |
+| Garten schedule | `switch.schedule_garten_mahen` (Mon/Wed/Fri 11:00) → fires `script.mow_garten` |
+| Seite schedule | `switch.schedule_seite_mahen` (Tue/Thu/Sat 11:00) → fires `script.mow_seite` |
 
 ## Requirements
 
@@ -50,7 +66,14 @@ That's gone. Instead:
 2. Copy `packages/luba_mower_scheduler.yaml` to `<config>/packages/luba_mower_scheduler.yaml`.
 3. Install `nielsfaber/scheduler-component` and `nielsfaber/scheduler-card` via HACS if not already there. Add the "Scheduler" integration under **Settings → Devices & Services**.
 4. Restart Home Assistant.
-5. Create one schedule per zone. Either via the scheduler-card UI in the dashboard, or via `scheduler.add` in **Developer Tools → Actions**:
+5. Create one schedule per zone via the **scheduler-card UI** in the dashboard:
+   - Click the `+` button in the Mähplan card.
+   - Pick the wrapper script for that zone as the action: **Mow Garten** or **Mow Seite**.
+     - No `service_data` needed — the wrapper carries the zone identity itself.
+   - Set weekdays and time.
+   - Save.
+
+   Or via `scheduler.add` in **Developer Tools → Actions**:
 
    ```yaml
    action: scheduler.add
@@ -59,30 +82,39 @@ That's gone. Instead:
      repeat_type: repeat
      weekdays: [mon, wed, fri]
      timeslots:
-       - start: "09:00:00"
-         stop: "09:15:00"
+       - start: "11:00:00"
          actions:
-           - service: script.mow_lawn
-             entity_id: script.mow_lawn
-             service_data:
-               zone_slug: garten
-               zone_button: button.garten_yuka_mnu7nps5_aufgabe_1
-               zone_label: Garten
+           - service: script.mow_garten
+             entity_id: script.mow_garten
    ```
 
-   (Same shape for Seite; different weekdays and different `zone_slug`/`zone_button`/`zone_label`.)
+   Same shape for Seite; different weekdays and `service: script.mow_seite`.
 6. Paste `dashboard.yaml` into a new dashboard view via **Settings → Dashboards → (your dashboard) → Edit → raw config editor**.
 7. Turn on `Mowing Automation Enabled` from the dashboard.
 
 ## What each schedule fires
 
-Each `switch.schedule_*` calls `script.mow_lawn` with three fields:
+Each `switch.schedule_*` calls the matching wrapper script (`script.mow_garten` or `script.mow_seite`). The wrapper is a no-argument script that in turn calls `script.mow_lawn` with three hard-coded fields:
 
 | Field | Purpose |
 |---|---|
 | `zone_slug` | Used inside the script to derive helper entity IDs like `input_datetime.<slug>_last_mow_1`. Must match the `input_datetime` naming in this package. |
 | `zone_button` | The Mammotion saved-task button to press for this zone. |
 | `zone_label` | Human-readable string written to `input_text.last_lawn_mowed`. |
+
+**Why the wrapper indirection?** scheduler-card's UI does not let you pass `service_data` to a `script.*` action. Any edit made in the card UI would drop the params silently. The wrapper scripts sidestep this — schedules just pick a no-argument script by name, and the zone identity lives in the wrapper's own sequence.
+
+## Adding a zone
+
+1. In `packages/luba_mower_scheduler.yaml`:
+   - Add `<zone>_last_mow_1/2/3` blocks under `input_datetime:`.
+   - Add a `"<Zone> Days Since Mow"` sensor to the first `template:` list item.
+   - Add a wrapper script `mow_<zone>` under `script:` that calls `script.mow_lawn` with the zone's `zone_slug` / `zone_button` / `zone_label`.
+2. Reload scripts (Developer Tools → YAML → Scripts) so the new wrapper appears.
+3. Create the schedule in the scheduler-card UI, picking your new wrapper script as the action.
+4. In `dashboard.yaml`: add the new schedule switch to the `include:` list of the `custom:scheduler-card`, and duplicate a Garten/Seite card block for the manual-mow button + days-since-mow sensor.
+
+`script.mow_lawn` itself is already parameterized — no changes needed there.
 
 ## Rain semantics
 
@@ -93,13 +125,3 @@ Both signals refresh every 30 minutes and at HA startup. The four rain/night aut
 ## Interaction with `automation.mower_paused_continue`
 
 You already have a separate automation, "Mower - Smart Restart and Reset", which handles stuck retries independently. It watches `sensor.yuka_mnu7nps5_activity_mode` for `MODE_PAUSE` and retries via `lawn_mower.start_mowing` up to 3× per stuck event using `input_number.mower_retry_count`. It doesn't overlap with the scheduler-component schedules and stays.
-
-## Adding a zone
-
-1. In `packages/luba_mower_scheduler.yaml`:
-   - Add `<zone>_last_mow_1/2/3` blocks under `input_datetime:`.
-   - Add a `"<Zone> Days Since Mow"` sensor to the first `template:` list item.
-2. Create the schedule via scheduler-card UI or `scheduler.add` (see step 5 above).
-3. In `dashboard.yaml`: add the new schedule switch to the `include:` list of the `custom:scheduler-card`, and duplicate a Garten/Seite card block if you want the days-since-mow + manual-mow button pair.
-
-No new script or automation is needed — `script.mow_lawn` is already parameterized.
