@@ -1,18 +1,25 @@
 # =============================================================================
-# Luba Mower dashboard view  (paschdan live install)
+# Luba Mower dashboard view  (paschdan live install, scheduler-component)
 # =============================================================================
-# Pre-wired against the actual entities in this HA instance:
+# Uses nielsfaber/scheduler-card for the timing side of things. All the
+# input_select "Frequency" and input_datetime "Next Mow" rows the previous
+# version had are gone — scheduler-card owns those entirely.
 #
+# Requirements:
+#   - HACS integration:  nielsfaber/scheduler-component
+#   - HACS Lovelace:     nielsfaber/scheduler-card  (adds custom:scheduler-card)
+#
+# Add as a new dashboard view via raw config editor.
+#
+# Wired entities (from the paschdan/personal live install):
 #   Mower       : lawn_mower.yuka_mnu7nps5
 #   Battery     : sensor.yuka_mnu7nps5_battery
 #   Tracker     : device_tracker.yuka_mnu7nps5_yuka_mnu7nps5
-#   Camera      : camera.yuka_mnu7nps5_none
+#   Camera      : camera.yuka_mnu7nps5_none  (custom:map-card variant used below)
 #   Buttons     : button.garten_yuka_mnu7nps5_aufgabe_1  (Garten)
 #                 button.garten_yuka_mnu7nps5_aufgabe_3  (Seite)
-#
-# Add as a new dashboard view:
-#   Settings > Dashboards > (your dashboard) > Edit > raw configuration editor,
-# then paste the block below under `views:`.
+#   Schedules   : switch.schedule_garten_mahen / switch.schedule_seite_mahen
+#                 (created via scheduler.add — see package README)
 # =============================================================================
 
 title: Mäher
@@ -43,21 +50,7 @@ cards:
       - entity: input_text.last_lawn_mowed
         name: Letzte Fläche
 
-  # ---- Live map (built-in map card, auto-centres on the mower) ------------
-  - type: map
-    title: Position
-    entities:
-      - device_tracker.yuka_mnu7nps5_yuka_mnu7nps5
-    hours_to_show: 24
-
-  # ---- Camera -------------------------------------------------------------
-  - type: picture-entity
-    title: Kamera
-    entity: camera.yuka_mnu7nps5_none
-    camera_view: live
-    show_state: false
-
-  # ---- Rain (from Met.no template sensors defined in the package) ---------
+  # ---- Weather ------------------------------------------------------------
   - type: entities
     title: Wetter
     entities:
@@ -68,14 +61,34 @@ cards:
       - entity: weather.forecast_home
         name: Vorhersage
 
-  # ---- Garten (zone 1) ----------------------------------------------------
+  # ---- Schedules (scheduler-card) -----------------------------------------
+  # Only show the mower schedules, not any other schedule entities that may
+  # exist (e.g. the watering schedule). discover_existing: false pins the
+  # card to the include list.
+  - type: custom:scheduler-card
+    title: Mähplan
+    include:
+      - switch.schedule_garten_mahen
+      - switch.schedule_seite_mahen
+    discover_existing: false
+    time_step: 15
+    show_add_button: true
+    display_options:
+      primary_info:
+        - "{name}"
+      secondary_info:
+        - additional-tasks
+        - time
+      icon: action
+    customize:
+      script.mow_lawn:
+        name: Mow lawn
+        icon: mdi:robot-mower
+
+  # ---- Garten card (manual mow + days-since sensor) -----------------------
   - type: entities
     title: Garten
     entities:
-      - entity: input_select.garten_schedule
-        name: Häufigkeit
-      - entity: input_datetime.garten_next_time
-        name: Nächster Mähtermin
       - entity: sensor.garten_days_since_mow
         name: Tage seit letztem Mähen
       - type: button
@@ -89,14 +102,10 @@ cards:
             zone_button: button.garten_yuka_mnu7nps5_aufgabe_1
             zone_label: Garten
 
-  # ---- Seite (zone 2) -----------------------------------------------------
+  # ---- Seite card (manual mow + days-since sensor) ------------------------
   - type: entities
     title: Seite
     entities:
-      - entity: input_select.seite_schedule
-        name: Häufigkeit
-      - entity: input_datetime.seite_next_time
-        name: Nächster Mähtermin
       - entity: sensor.seite_days_since_mow
         name: Tage seit letztem Mähen
       - type: button
@@ -109,3 +118,34 @@ cards:
             zone_slug: seite
             zone_button: button.garten_yuka_mnu7nps5_aufgabe_3
             zone_label: Seite
+
+  # ---- Camera + live map --------------------------------------------------
+  # ha-mammotion-assets ships a custom:map-card variant with a geojson plugin
+  # that overlays the mower's mowing area on the map. If you don't have that
+  # HACS integration, swap this for a plain built-in `type: map` card.
+  - type: custom:map-card
+    theme_mode: light
+    focus_entity: device_tracker.yuka_mnu7nps5_yuka_mnu7nps5
+    zoom: 20
+    card_size: 7
+    tile_layers:
+      - url: https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+        options:
+          maxZoom: 24
+          maxNativeZoom: 18
+          minZoom: 14
+          detectRetina: true
+    map_options:
+      maxZoom: 24
+      minZoom: 14
+    plugins:
+      - name: geoJson
+        url: /hacsfiles/ha-mammotion-assets/dist/geojson.js
+        options:
+          rotation_deg: 0
+          entity_id: lawn_mower.yuka_mnu7nps5
+    entities:
+      - entity: device_tracker.yuka_mnu7nps5_yuka_mnu7nps5
+        picture: /hacsfiles/ha-mammotion-assets/dist/assets/map/dc_newui_icon_map_yuka_mn_white.png
+        size: 30
+        display: marker
