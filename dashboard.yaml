@@ -65,30 +65,35 @@ cards:
   # Only show the mower schedules, not any other schedule entities that may
   # exist (e.g. the watering schedule). discover_existing: false pins the
   # card to the include list.
+  #
+  # NOTE: `include:` must list the entities that the schedules ACT ON, not
+  # the schedule switch entity_ids themselves. Our schedules toggle the
+  # per-zone window helpers, so those go here.
   - type: custom:scheduler-card
     title: Mähplan
     include:
-      - switch.schedule_garten_mahen
-      - switch.schedule_seite_mahen
+      - input_boolean.garten_mow_window
+      - input_boolean.seite_mow_window
     discover_existing: false
     time_step: 15
     show_add_button: true
     display_options:
-      primary_info:
-        - "{name}"
+      primary_info: default
       secondary_info:
-        - additional-tasks
+        - relative-time
+        - days
         - time
+        - additional-tasks
       icon: action
-    customize:
-      script.mow_lawn:
-        name: Mow lawn
-        icon: mdi:robot-mower
+    show_toggle_switches: true
+    show_header_toggle: false
 
-  # ---- Garten card (manual mow + days-since sensor) -----------------------
+  # ---- Garten card (window state + manual mow + days-since sensor) --------
   - type: entities
     title: Garten
     entities:
+      - entity: input_boolean.garten_mow_window
+        name: Mäh-Fenster offen
       - entity: sensor.garten_days_since_mow
         name: Tage seit letztem Mähen
       - type: button
@@ -96,16 +101,14 @@ cards:
         icon: mdi:robot-mower
         tap_action:
           action: perform-action
-          perform_action: script.mow_lawn
-          data:
-            zone_slug: garten
-            zone_button: button.garten_yuka_mnu7nps5_aufgabe_1
-            zone_label: Garten
+          perform_action: script.mow_garten
 
-  # ---- Seite card (manual mow + days-since sensor) ------------------------
+  # ---- Seite card (window state + manual mow + days-since sensor) ---------
   - type: entities
     title: Seite
     entities:
+      - entity: input_boolean.seite_mow_window
+        name: Mäh-Fenster offen
       - entity: sensor.seite_days_since_mow
         name: Tage seit letztem Mähen
       - type: button
@@ -113,11 +116,7 @@ cards:
         icon: mdi:robot-mower
         tap_action:
           action: perform-action
-          perform_action: script.mow_lawn
-          data:
-            zone_slug: seite
-            zone_button: button.garten_yuka_mnu7nps5_aufgabe_3
-            zone_label: Seite
+          perform_action: script.mow_seite
 
   # ---- Camera + live map --------------------------------------------------
   # ha-mammotion-assets ships a custom:map-card variant with a geojson plugin
