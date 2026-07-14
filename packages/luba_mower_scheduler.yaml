@@ -1,86 +1,47 @@
 # =============================================================================
 # Luba Mower Smart Scheduler — Home Assistant package  (paschdan live install)
 # =============================================================================
-# Personal branch of paschdan/luba-mower-scheduler, pre-wired for the actual
-# hardware in this HA instance AND refactored to use nielsfaber/scheduler-component
-# for the timing side (in place of a hand-rolled input_datetime/input_select
-# scheduler automation).
+# Personal branch of paschdan/luba-mower-scheduler, refactored to use
+# nielsfaber/scheduler-component for scheduling. Timing lives in
+# scheduler-component schedules that call per-zone wrapper scripts
+# (script.mow_garten / script.mow_seite); the mowing gating (mowing_automation
+# / do_not_mow / mower-busy) lives inside script.mow_lawn as up-front conditions.
 #
-#   - Mower       : lawn_mower.yuka_mnu7nps5  (Mammotion Yuka)
-#   - Zone 1      : "Garten"  -> button.garten_yuka_mnu7nps5_aufgabe_1
-#   - Zone 2      : "Seite"   -> button.garten_yuka_mnu7nps5_aufgabe_3
-#   - Rain source : weather.forecast_home (Met.no) via a trigger-based
-#                   template sensor that polls weather.get_forecasts.
-#   - Camera      : camera.yuka_mnu7nps5_none
-#   - GPS         : device_tracker.yuka_mnu7nps5_yuka_mnu7nps5
-#   - Battery     : sensor.yuka_mnu7nps5_battery
+# Wired entities in this HA instance:
+#   Mower       : lawn_mower.yuka_mnu7nps5  (Mammotion Yuka)
+#   Zone 1      : "Garten"  -> button.garten_yuka_mnu7nps5_aufgabe_1
+#   Zone 2      : "Seite"   -> button.garten_yuka_mnu7nps5_aufgabe_3
+#   Rain source : weather.forecast_home (Met.no) via a trigger-based template
+#                 that polls weather.get_forecasts (hourly) every 15 min.
+#   Battery     : sensor.yuka_mnu7nps5_battery
+#   GPS         : device_tracker.yuka_mnu7nps5_yuka_mnu7nps5
+#   Camera      : camera.yuka_mnu7nps5_none
 #
-# The scheduler is compatible with automation.mower_paused_continue
-# ("Mower - Smart Restart and Reset"), which handles stuck retries independently.
+# =============================================================================
+# RAIN & DAMP-GRASS HEURISTIC
+# =============================================================================
+# The rain-delay logic checks SIX signals. Mowing is blocked when ANY of these
+# is true:
 #
-# ARCHITECTURE
-# ------------
-# The previous per-zone `input_datetime.<zone>_next_time` +
-# `input_select.<zone>_schedule` + `automation.luba_mower_scheduler` triple has
-# been replaced with **schedules managed by nielsfaber/scheduler-component**.
-# Each zone gets its own `switch.schedule_*` entity (created via scheduler.add
-# or the scheduler-card UI) whose action calls `script.mow_lawn` with the
-# right zone parameters. All the "should I mow right now?" gating
-# (mowing_automation_enabled / do_not_mow / mower busy) is now inside
-# `script.mow_lawn` itself as up-front conditions — so a scheduled slot that
-# fires while it's raining or the mower is docked simply no-ops, and the next
-# scheduled slot will re-try naturally.
+#   sensor.rain_today        > 3 mm     forecast for today (whole-day sum)
+#   sensor.rain_probability  > 50 %     fraction of today's forecast hours
+#                                       with any predicted precipitation
+#   sensor.rain_current_hour > 0.5 mm   forecast for the current hour
+#   sensor.rain_last_3h      > 5 mm     rolling-sum, grass likely damp
+#   sensor.rain_last_6h      > 25 mm    rolling-sum, heavy rain earlier today
+#   weather.forecast_home in {rainy, pouring, lightning-rainy, lightning,
+#                             hail, snowy, snowy-rainy}
 #
-# NO MORE:
-#   - input_select.<zone>_schedule   (removed; scheduler-component owns cadence)
-#   - input_datetime.<zone>_next_time (removed; scheduler-component owns next-run)
-#   - automation.luba_mower_scheduler (removed; scheduler-component fires the script)
+# The 3h/6h rolling sums are the "damp grass" fix: even after rain stops,
+# the grass stays wet for a while. Once cumulative rainfall over the window
+# ages past 3h/6h and drops below the threshold, mowing is allowed again.
 #
-# STILL HERE (used by script + dashboard):
-#   - input_boolean.*                 (automation_enabled / do_not_mow / block_night_mowing)
-#   - input_datetime.<zone>_last_mow_1/2/3 (rolling history for days-since-mow sensor)
-#   - input_text.reason_no_mow / last_lawn_mowed
-#   - sensor.<zone>_days_since_mow
-#   - sensor.rain_today / sensor.rain_probability (trigger-based Met.no templates)
-#   - 4x rain/night automations (do_not_mow_if_rain, reset_do_not_mow_if_dry,
-#     block_mowing_at_night, allow_mowing_at_sunrise)
-#   - script.mow_lawn (parameterized; now gated by up-front conditions)
+# The rolling sums are HA's built-in `statistics` platform sensors (see the
+# top-level `sensor:` block near the end of this file), feeding off
+# `sensor.rain_current_hour` and re-sampling every 15 min.
 #
-# INSTALL
-# -------
-# 1. In configuration.yaml, ensure packages are enabled once:
-#      homeassistant:
-#        packages: !include_dir_named packages
-# 2. Drop this file into  <config>/packages/luba_mower_scheduler.yaml
-#    (or <config>/packages/mower.yaml — filename doesn't matter for HA)
-# 3. Install nielsfaber/scheduler-component via HACS (integration) if not
-#    already installed. Add the "Scheduler" integration under Settings > Devices
-#    & Services.
-# 4. Optionally install nielsfaber/scheduler-card via HACS (Lovelace) for a
-#    nice UI to edit schedules — dashboard.yaml includes it as
-#    `custom:scheduler-card`.
-# 5. Restart Home Assistant.
-# 6. Create per-zone schedules by either:
-#    - Using the scheduler-card UI (recommended) — set weekdays + time,
-#      pick script.mow_lawn as the action, and pass the right service_data.
-#    - Calling `scheduler.add` from Developer Tools > Actions. Example for
-#      "Garten Mon/Wed/Fri 09:00":
-#         action: scheduler.add
-#         data:
-#           name: Garten mähen
-#           repeat_type: repeat
-#           weekdays: [mon, wed, fri]
-#           timeslots:
-#             - start: "09:00:00"
-#               stop: "09:15:00"
-#               actions:
-#                 - service: script.mow_lawn
-#                   entity_id: script.mow_lawn
-#                   service_data:
-#                     zone_slug: garten
-#                     zone_button: button.garten_yuka_mnu7nps5_aufgabe_1
-#                     zone_label: Garten
-# 7. Turn on `Mowing Automation Enabled` in the dashboard.
+# Approach inspired by simon42.com's Luba-2 automation, adjusted for Met.no's
+# hourly forecast shape (which doesn't expose a native probability field).
 # =============================================================================
 
 
@@ -96,6 +57,8 @@ input_boolean:
     name: Do Not Mow
     icon: mdi:robot-mower-off
     # Auto-managed by rain/night automations. Turn on manually to pause mowing.
+    # This is an INTERLOCK (on = blocked), not a permission — the naming is
+    # a bit misleading. Read: "off = green light, on = stop".
 
   block_night_mowing:
     name: Block Night Mowing
@@ -105,7 +68,6 @@ input_boolean:
 # -----------------------------------------------------------------------------
 # HELPERS: per-zone rolling mow-history
 #   <zone>_last_mow_1/2/3 = rolling history of the last three mows (1 = newest)
-# The old <zone>_next_time helpers are GONE — scheduler-component owns "when".
 # -----------------------------------------------------------------------------
 input_datetime:
   garten_last_mow_1:
@@ -152,14 +114,6 @@ input_text:
 
 # -----------------------------------------------------------------------------
 # TEMPLATE SENSORS
-#
-# 1. Per-zone "days since last mow".
-# 2. Rain sensors pulled from weather.forecast_home (Met.no) forecast via a
-#    trigger-based template that calls weather.get_forecasts on a schedule.
-#    Populates sensor.rain_today (mm total for today) and sensor.rain_probability
-#    (% of today's remaining forecast hours with precipitation > 0, since Met.no
-#    doesn't expose a native probability field). Matches the "> 3 mm OR > 50%"
-#    logic the rain-delay automations expect.
 # -----------------------------------------------------------------------------
 template:
   # --- Per-zone days-since-mow ------------------------------------------------
@@ -181,12 +135,22 @@ template:
           {% if ts %}{{ ((now().timestamp() - ts) / 86400) | round(0) | int }}{% else %}unknown{% endif %}
 
   # --- Rain forecast (Met.no via weather.forecast_home) -----------------------
-  # Trigger-based template refreshes every 30 minutes and at HA startup, calls
-  # weather.get_forecasts (hourly) on weather.forecast_home, and derives two
-  # sensors the rain-delay automations feed on.
+  # Refreshes every 15 minutes and at HA start; calls weather.get_forecasts
+  # and derives three sensors:
+  #
+  #   sensor.rain_today        (mm)  = sum of precipitation across today's
+  #                                    remaining hourly forecast slots
+  #   sensor.rain_probability  (%)   = fraction of today's remaining hourly
+  #                                    forecast slots with precipitation > 0
+  #                                    (Met.no has no native probability field;
+  #                                    this is a proxy)
+  #   sensor.rain_current_hour (mm)  = precipitation forecast for the NEXT
+  #                                    hourly slot (forecast[0]) — feeds the
+  #                                    3h/6h rolling statistics sensors AND
+  #                                    the "raining now" automation gate
   - trigger:
       - platform: time_pattern
-        minutes: "/30"
+        minutes: "/15"
       - platform: homeassistant
         event: start
     action:
@@ -228,16 +192,63 @@ template:
             {{ ((wet / (slots | count)) * 100) | round(0) | int }}
           {% endif %}
 
+      - name: "Rain Current Hour"
+        unique_id: rain_current_hour
+        unit_of_measurement: "mm"
+        icon: mdi:weather-rainy
+        state_class: measurement  # required for the statistics platform below
+        state: >
+          {% set slots = fc['weather.forecast_home'].forecast %}
+          {% if slots | count == 0 %}
+            0
+          {% else %}
+            {{ (slots[0].precipitation | float(0)) | round(2) }}
+          {% endif %}
+
 
 # -----------------------------------------------------------------------------
-# SCRIPT: single parameterized mow (called by scheduler-component schedules
-# and by the manual "jetzt mähen" dashboard buttons).
+# LEGACY-PLATFORM SENSORS: rolling-window rain statistics
 #
-# All up-front gating (automation enabled? do_not_mow off? mower idle?) is
-# HERE, not in a separate scheduler automation. When scheduler-component fires
-# this script at a scheduled slot and something's blocking, the conditions
-# short-circuit the sequence — no mow, no partial state changes, no manual
-# retry logic needed (the next slot re-tries naturally).
+# HA's built-in `statistics` platform (still YAML-only) samples an input
+# sensor over a moving time window and exposes aggregates. We use `sum` over
+# 3h and 6h windows against sensor.rain_current_hour to build the
+# "cumulative recent rainfall" values.
+#
+# NOTE ON RESTART REQUIREMENT: legacy-platform sensors like `statistics`
+# don't hot-reload. Adding or changing them requires a full HA restart to
+# take effect. Modifying just the automation/template/script parts in this
+# package can still be done via reload_core targets without a restart.
+# -----------------------------------------------------------------------------
+sensor:
+  - platform: statistics
+    name: "Rain Last 3h"
+    unique_id: rain_last_3h
+    entity_id: sensor.rain_current_hour
+    state_characteristic: sum
+    sampling_size: 20
+    max_age:
+      hours: 3
+
+  - platform: statistics
+    name: "Rain Last 6h"
+    unique_id: rain_last_6h
+    entity_id: sensor.rain_current_hour
+    state_characteristic: sum
+    sampling_size: 40
+    max_age:
+      hours: 6
+
+
+# -----------------------------------------------------------------------------
+# SCRIPTS
+#
+# script.mow_lawn is the parameterized worker (zone_slug / zone_button /
+# zone_label). It carries the up-front guards so scheduler-component slots
+# and dashboard buttons all short-circuit cleanly when conditions block.
+#
+# script.mow_garten / script.mow_seite are per-zone wrapper shims that call
+# mow_lawn with hard-coded fields. scheduler-card can't pass service_data,
+# so schedules point at these wrappers by name instead.
 # -----------------------------------------------------------------------------
 script:
   mow_lawn:
@@ -320,15 +331,11 @@ script:
         target:
           entity_id: "{{ zone_button }}"
 
-
   # ---------------------------------------------------------------------------
   # Per-zone wrapper scripts.
-  #
-  # scheduler-card cannot pass service_data to script.* actions, so we expose
-  # one no-argument wrapper per zone. Each wrapper is a thin shim that calls
-  # script.mow_lawn with its hard-coded zone identity. Selecting these in the
-  # card UI adds a schedule that fires the right zone with no room for the
-  # data payload to get lost on a card-level edit.
+  # scheduler-card cannot pass service_data to script.* actions, so each
+  # zone gets a no-argument wrapper that calls script.mow_lawn with its
+  # zone identity hard-coded.
   # ---------------------------------------------------------------------------
   mow_garten:
     alias: Mow Garten
@@ -358,26 +365,55 @@ script:
 # -----------------------------------------------------------------------------
 # AUTOMATIONS
 #
-# The old luba_mower_scheduler automation is GONE — scheduler-component now
-# owns the "when to fire script.mow_lawn" role. What remains: the four
-# rain/night helpers that manage the do_not_mow flag.
+# Four rain/night automations. Trigger every 15 min or on sunrise/sunset
+# events; they write to input_boolean.do_not_mow to gate the scripts.
 # -----------------------------------------------------------------------------
 automation:
   # ---------------------------------------------------------------------------
-  # Rain delay (fed by sensor.rain_today + sensor.rain_probability from the
-  # Met.no template above).
+  # Rain / damp grass — block mowing.
+  #
+  # Fires every 15 min and turns on do_not_mow if ANY rain signal fires.
+  # The reason text explains WHICH signal fired (helps troubleshoot without
+  # reading the automation trace).
   # ---------------------------------------------------------------------------
   - id: do_not_mow_if_rain
     alias: Do Not Mow if Rain
     mode: restart
     trigger:
       - platform: time_pattern
-        minutes: "/30"
+        minutes: "/15"
     condition:
-      - condition: template
-        value_template: >
-          {{ states('sensor.rain_today') | float(0) > 3
-             or states('sensor.rain_probability') | float(0) > 50 }}
+      - condition: or
+        conditions:
+          # Forecast for today.
+          - condition: template
+            value_template: >
+              {{ states('sensor.rain_today') | float(0) > 3 }}
+          - condition: template
+            value_template: >
+              {{ states('sensor.rain_probability') | float(0) > 50 }}
+          # Raining now / next hour.
+          - condition: template
+            value_template: >
+              {{ states('sensor.rain_current_hour') | float(0) > 0.5 }}
+          # Damp-grass heuristic: recent cumulative rainfall.
+          - condition: template
+            value_template: >
+              {{ states('sensor.rain_last_3h') | float(0) > 5 }}
+          - condition: template
+            value_template: >
+              {{ states('sensor.rain_last_6h') | float(0) > 25 }}
+          # Current weather condition is actively wet.
+          - condition: state
+            entity_id: weather.forecast_home
+            state:
+              - rainy
+              - pouring
+              - lightning-rainy
+              - lightning
+              - hail
+              - snowy
+              - snowy-rainy
     action:
       - action: input_boolean.turn_on
         target:
@@ -387,35 +423,65 @@ automation:
           entity_id: input_text.reason_no_mow
         data:
           value: >
-            {% if states('sensor.rain_today') | float(0) > 3 %}wet ground{% else %}rain soon{% endif %}
+            {% set c = states('weather.forecast_home') %}
+            {% set now_h = states('sensor.rain_current_hour') | float(0) %}
+            {% set l3 = states('sensor.rain_last_3h') | float(0) %}
+            {% set l6 = states('sensor.rain_last_6h') | float(0) %}
+            {% set td = states('sensor.rain_today') | float(0) %}
+            {% set pb = states('sensor.rain_probability') | float(0) %}
+            {% if c in ['rainy','pouring','lightning-rainy','lightning','hail','snowy','snowy-rainy'] %}raining ({{ c }})
+            {% elif now_h > 0.5 %}raining now ({{ now_h }}mm/h)
+            {% elif l3 > 5 %}wet grass ({{ l3 }}mm last 3h)
+            {% elif l6 > 25 %}wet grass ({{ l6 }}mm last 6h)
+            {% elif td > 3 %}rain today ({{ td }}mm forecast)
+            {% else %}rain soon ({{ pb }}%)
+            {% endif %}
 
+  # ---------------------------------------------------------------------------
+  # Reset do_not_mow when ALL rain signals are dry.
+  # Only during the day, so it doesn't undo the night-block below.
+  # ---------------------------------------------------------------------------
   - id: reset_do_not_mow_if_dry
     alias: Reset Do Not Mow if Dry
     mode: single
     trigger:
       - platform: time_pattern
-        minutes: "/30"
+        minutes: "/15"
     condition:
-      # Template (not numeric_state) so a MISSING rain sensor reads as 0/"dry",
-      # matching the fallback where "no rain sensors = never triggers rain
-      # delay, but also never blocks the auto-clear".
-      - condition: template
-        value_template: >
-          {{ states('sensor.rain_today') | float(0) <= 3
-             and states('sensor.rain_probability') | float(0) <= 50 }}
-      # Only auto-clear during the day, so the night block below isn't undone.
       - condition: sun
         after: sunrise
         after_offset: "01:00:00"
         before: sunset
         before_offset: "-01:00:00"
+      # ALL rain signals must be dry (using float(0) so a missing sensor
+      # reads as 0 = dry, matching the graceful-degradation semantics).
+      - condition: template
+        value_template: >
+          {{ states('sensor.rain_today') | float(0) <= 3
+             and states('sensor.rain_probability') | float(0) <= 50
+             and states('sensor.rain_current_hour') | float(0) <= 0.5
+             and states('sensor.rain_last_3h') | float(0) <= 5
+             and states('sensor.rain_last_6h') | float(0) <= 25 }}
+      # Weather condition must not be actively wet.
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: weather.forecast_home
+            state:
+              - rainy
+              - pouring
+              - lightning-rainy
+              - lightning
+              - hail
+              - snowy
+              - snowy-rainy
     action:
       - action: input_boolean.turn_off
         target:
           entity_id: input_boolean.do_not_mow
 
   # ---------------------------------------------------------------------------
-  # Night block (optional — gated by input_boolean.block_night_mowing).
+  # Night block (only when block_night_mowing is enabled).
   # ---------------------------------------------------------------------------
   - id: block_mowing_at_night
     alias: Block Mowing at Night
@@ -438,6 +504,10 @@ automation:
         data:
           value: night time
 
+  # ---------------------------------------------------------------------------
+  # Allow mowing at sunrise — but only if all rain signals are dry too.
+  # Otherwise a wet morning would clear do_not_mow just because sunrise fired.
+  # ---------------------------------------------------------------------------
   - id: allow_mowing_at_sunrise
     alias: Allow Mowing at Sunrise
     mode: single
@@ -449,12 +519,25 @@ automation:
       - condition: state
         entity_id: input_boolean.block_night_mowing
         state: "on"
-      # Template (see reset_do_not_mow_if_dry) so a MISSING rain sensor
-      # counts as "dry" and doesn't strand do_not_mow.
       - condition: template
         value_template: >
           {{ states('sensor.rain_today') | float(0) <= 3
-             and states('sensor.rain_probability') | float(0) <= 50 }}
+             and states('sensor.rain_probability') | float(0) <= 50
+             and states('sensor.rain_current_hour') | float(0) <= 0.5
+             and states('sensor.rain_last_3h') | float(0) <= 5
+             and states('sensor.rain_last_6h') | float(0) <= 25 }}
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: weather.forecast_home
+            state:
+              - rainy
+              - pouring
+              - lightning-rainy
+              - lightning
+              - hail
+              - snowy
+              - snowy-rainy
     action:
       - action: input_boolean.turn_off
         target:

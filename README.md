@@ -118,9 +118,30 @@ Each `switch.schedule_*` calls the matching wrapper script (`script.mow_garten` 
 
 ## Rain semantics
 
-Met.no's hourly forecast has `precipitation` (mm) but **no** `precipitation_probability` field. To keep the two-signal rain check working, `sensor.rain_probability` is derived as *"fraction of today's remaining forecast hours that have any predicted precipitation, 0–100"*. So a forecast where 3 of the remaining 12 hours today have rain would give `rain_probability: 25`.
+**Six** rain signals gate mowing. Any one being "wet" turns on `input_boolean.do_not_mow` and blocks all schedules + manual buttons:
 
-Both signals refresh every 30 minutes and at HA startup. The four rain/night automations gate `input_boolean.do_not_mow`, and `script.mow_lawn` short-circuits when `do_not_mow` is on — so the scheduler-component slot fires, the script no-ops, and the next slot re-tries naturally.
+| Signal | Threshold | What it captures |
+|---|---|---|
+| `sensor.rain_today` | > 3 mm | Total precipitation forecast for the rest of today |
+| `sensor.rain_probability` | > 50 % | Fraction of today's forecast hours with any precipitation (proxy for Met.no's missing native probability) |
+| `sensor.rain_current_hour` | > 0.5 mm | Precipitation forecast for the current hour (`forecast[0]`) |
+| `sensor.rain_last_3h` | > 5 mm | Rolling sum: is the grass damp from recent rain? |
+| `sensor.rain_last_6h` | > 25 mm | Rolling sum: was there heavy rain earlier today? |
+| `weather.forecast_home` | in `[rainy, pouring, lightning-rainy, lightning, hail, snowy, snowy-rainy]` | Actively-wet current weather condition |
+
+The **3h / 6h rolling sums** are HA's built-in `statistics` platform sensors feeding off `sensor.rain_current_hour`. That gives us "cumulative recent rainfall" without any custom code. This is the **damp-grass fix**: even after rain stops, the grass stays wet, so we keep blocking until the rolling window ages out.
+
+`reset_do_not_mow_if_dry` requires ALL six signals to be dry before clearing the flag, and only clears during the day. `allow_mowing_at_sunrise` uses the same all-dry check so a wet morning doesn't flip the flag off just because sunrise happened.
+
+Approach inspired by [simon42.com's Luba-2 automation](https://www.simon42.com/luba-2-mahroboter/#starten-des-luba-2-yuka-maehroboters), adjusted for Met.no's hourly forecast shape.
+
+### Grace period
+
+The statistics sensors need up to their full window (3h and 6h respectively) to "warm up" after HA starts. During warmup they show partial sums with a `buffer_usage_ratio` / `age_coverage_ratio` < 1. The rain-delay logic still works during warmup — it just uses whatever data is buffered so far.
+
+### Restart requirement
+
+The `sensor: - platform: statistics` block uses legacy YAML syntax that doesn't hot-reload. Adding or changing those two sensors requires a full HA restart. Everything else in this package reloads via `homeassistant.reload_core_config` targets without a restart.
 
 ## Interaction with `automation.mower_paused_continue`
 
