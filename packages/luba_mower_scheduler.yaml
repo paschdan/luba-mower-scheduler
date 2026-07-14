@@ -264,14 +264,18 @@ script:
       - condition: state
         entity_id: input_boolean.do_not_mow
         state: "off"
+      # Mower must be in a state where starting a mow makes sense.
+      # Refuses to press the button if the mower is already out
+      # (mowing / returning) OR is unreachable (unavailable / unknown).
       - condition: not
         conditions:
           - condition: state
             entity_id: lawn_mower.yuka_mnu7nps5
-            state: mowing
-          - condition: state
-            entity_id: lawn_mower.yuka_mnu7nps5
-            state: returning
+            state:
+              - mowing
+              - returning
+              - unavailable
+              - unknown
 
       # ============================================================
       # Per-zone entity-id bindings (derived from zone_slug field)
