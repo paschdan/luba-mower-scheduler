@@ -15,18 +15,56 @@ That's gone. Instead:
 ## Script topology
 
 ```
-switch.schedule_garten_mahen (Mon/Wed/Fri 11:00)
-  └─ calls script.mow_garten (no arguments)
-       └─ calls script.mow_lawn with hard-coded fields:
-            zone_slug=garten, zone_button=Aufgabe-1, zone_label=Garten
-              └─ guards → history-roll → button.press
-
-switch.schedule_seite_mahen  (Tue/Thu/Sat 11:00)
-  └─ calls script.mow_seite (no arguments)
-       └─ calls script.mow_lawn with hard-coded fields:
-            zone_slug=seite, zone_button=Aufgabe-3, zone_label=Seite
-              └─ guards → history-roll → button.press
+┌───────────────────────────────────────────────────────────────────────┐
+│  scheduler-component schedule  (Mon/Wed/Fri 11:00-18:00 for Garten)   │
+│                                                                       │
+│  11:00 ─► input_boolean.garten_mow_window = on   (window opens)       │
+│  18:00 ─► input_boolean.garten_mow_window = off  (window closes)      │
+└───────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│  automation.try_mow_when_window_open                                  │
+│                                                                       │
+│  Triggers on:                                                         │
+│   • garten_mow_window off -> on   (window just opened)                │
+│   • seite_mow_window  off -> on   (window just opened)                │
+│   • do_not_mow        on -> off   (rain just cleared, mid-window)     │
+│                                                                       │
+│  Guards:                                                              │
+│   • mowing_automation_enabled = on                                    │
+│   • do_not_mow = off                                                  │
+│   • mower not busy (mowing / returning)                               │
+│   • before sunset - 3h                                                │
+│                                                                       │
+│  For each zone whose window is open AND hasn't mowed today:           │
+│    calls script.mow_garten  /  script.mow_seite                       │
+└───────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│  script.mow_<zone>  (thin wrapper)                                    │
+│    -> script.mow_lawn(zone_slug, zone_button, zone_label)             │
+│                                                                       │
+│  script.mow_lawn                                                      │
+│    up-front guards (redundant safety net):                            │
+│      • mowing_automation_enabled = on                                 │
+│      • do_not_mow = off                                               │
+│      • mower not busy                                                 │
+│    then:                                                              │
+│      • roll last-mow history                                          │
+│      • input_text.last_lawn_mowed = "Garten" / "Seite"                │
+│      • button.press on the Aufgabe button                             │
+└───────────────────────────────────────────────────────────────────────┘
 ```
+
+### Why the eligibility-window pattern?
+
+The naive design would have the schedule call the script directly at 11:00. That has a fatal flaw: if it's raining at 11:00 the script no-ops (correct), but nothing tries again later. If the rain clears at 12:00, mowing waits until the next scheduled day.
+
+The window pattern fixes this. The schedule opens a window (11:00-18:00 by default) and the orchestrator automation retries every time conditions become green — either at window-open or whenever `do_not_mow` clears. The "already mowed today?" check on `input_datetime.<zone>_last_mow_1` prevents double-mow.
+
+If the whole window passes under rain, the day is skipped and the next scheduled day tries again — that's the correct behavior. The sunset-3h cutoff prevents late-day mowing.
 
 ## Wiring in this branch
 
@@ -39,8 +77,8 @@ switch.schedule_seite_mahen  (Tue/Thu/Sat 11:00)
 | Battery | `sensor.yuka_mnu7nps5_battery` |
 | GPS | `device_tracker.yuka_mnu7nps5_yuka_mnu7nps5` |
 | Camera | `camera.yuka_mnu7nps5_none` |
-| Garten schedule | `switch.schedule_garten_mahen` (Mon/Wed/Fri 11:00) → fires `script.mow_garten` |
-| Seite schedule | `switch.schedule_seite_mahen` (Tue/Thu/Sat 11:00) → fires `script.mow_seite` |
+| Garten schedule | `switch.schedule_garten_mahen` (Mon/Wed/Fri) → toggles `input_boolean.garten_mow_window` on 11:00, off 18:00 |
+| Seite schedule | `switch.schedule_seite_mahen` (Tue/Thu/Sat) → toggles `input_boolean.seite_mow_window` on 11:00, off 18:00 |
 
 ## Requirements
 
@@ -66,12 +104,11 @@ switch.schedule_seite_mahen  (Tue/Thu/Sat 11:00)
 2. Copy `packages/luba_mower_scheduler.yaml` to `<config>/packages/luba_mower_scheduler.yaml`.
 3. Install `nielsfaber/scheduler-component` and `nielsfaber/scheduler-card` via HACS if not already there. Add the "Scheduler" integration under **Settings → Devices & Services**.
 4. Restart Home Assistant.
-5. Create one schedule per zone via the **scheduler-card UI** in the dashboard:
-   - Click the `+` button in the Mähplan card.
-   - Pick the wrapper script for that zone as the action: **Mow Garten** or **Mow Seite**.
-     - No `service_data` needed — the wrapper carries the zone identity itself.
-   - Set weekdays and time.
-   - Save.
+5. Create one schedule per zone via the **scheduler-card UI** in the dashboard.
+
+   The schedule should have **two timeslots**, both targeting the zone's `input_boolean.<zone>_mow_window` helper:
+   - 11:00-18:00 → `input_boolean.turn_on`
+   - 18:00-23:59 → `input_boolean.turn_off`
 
    Or via `scheduler.add` in **Developer Tools → Actions**:
 
@@ -83,12 +120,22 @@ switch.schedule_seite_mahen  (Tue/Thu/Sat 11:00)
      weekdays: [mon, wed, fri]
      timeslots:
        - start: "11:00:00"
+         stop: "18:00:00"
          actions:
-           - service: script.mow_garten
-             entity_id: script.mow_garten
+           - service: input_boolean.turn_on
+             entity_id: input_boolean.garten_mow_window
+       - start: "18:00:00"
+         stop: "23:59:00"
+         actions:
+           - service: input_boolean.turn_off
+             entity_id: input_boolean.garten_mow_window
    ```
 
-   Same shape for Seite; different weekdays and `service: script.mow_seite`.
+   Same shape for Seite; different weekdays and target `input_boolean.seite_mow_window`.
+
+   You also need the two eligibility-window helpers created as storage-mode input_booleans (**Settings → Devices & Services → Helpers → Toggle**):
+   - `garten_mow_window` — name: "Garten Mow Window"
+   - `seite_mow_window` — name: "Seite Mow Window"
 6. Paste `dashboard.yaml` into a new dashboard view via **Settings → Dashboards → (your dashboard) → Edit → raw config editor**.
 7. Turn on `Mowing Automation Enabled` from the dashboard.
 
@@ -106,13 +153,17 @@ Each `switch.schedule_*` calls the matching wrapper script (`script.mow_garten` 
 
 ## Adding a zone
 
-1. In `packages/luba_mower_scheduler.yaml`:
+1. **Create a storage-mode helper** for the new zone's eligibility window: `input_boolean.<zone>_mow_window` (Settings → Devices & Services → Helpers → Toggle).
+2. In `packages/luba_mower_scheduler.yaml`:
    - Add `<zone>_last_mow_1/2/3` blocks under `input_datetime:`.
    - Add a `"<Zone> Days Since Mow"` sensor to the first `template:` list item.
    - Add a wrapper script `mow_<zone>` under `script:` that calls `script.mow_lawn` with the zone's `zone_slug` / `zone_button` / `zone_label`.
-2. Reload scripts (Developer Tools → YAML → Scripts) so the new wrapper appears.
-3. Create the schedule in the scheduler-card UI, picking your new wrapper script as the action.
-4. In `dashboard.yaml`: add the new schedule switch to the `include:` list of the `custom:scheduler-card`, and duplicate a Garten/Seite card block for the manual-mow button + days-since-mow sensor.
+   - In `automation.try_mow_when_window_open`:
+     - Add a `- platform: state` trigger on `input_boolean.<zone>_mow_window` (off → on).
+     - Add a `- choose:` action block per zone that runs the wrapper script (mirror the existing Garten/Seite blocks).
+3. Reload automations + scripts (Developer Tools → YAML). No HA restart needed if you didn't touch the `sensor:` block.
+4. Create the schedule in the scheduler-card UI: two timeslots (on and off) targeting the new window helper.
+5. In `dashboard.yaml`: add the new schedule switch to the `include:` list of the `custom:scheduler-card`, add the new window helper to the "Mow Controls" card, and duplicate a Garten/Seite card block for the manual-mow button + days-since-mow sensor.
 
 `script.mow_lawn` itself is already parameterized — no changes needed there.
 
