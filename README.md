@@ -24,13 +24,26 @@ The daily trigger fires at **09:00** — early enough to catch a dry morning win
 
 ## Automation topology
 
-**Ours**: `mower_dispatch` — handles both "start a mow" and "record a completion".
+**Ours**: `mower_dispatch` — handles three things: start a new mow, resume a paused mow (after rain clears), and record a completion.
 
-**Yours (pre-existing, unchanged)**: `mower_paused_continue` — resumes stuck-in-PAUSE mows via `lawn_mower.start_mowing` with 3-retry limit.
+**Yours (pre-existing, unchanged)**: `mower_paused_continue` — retries `lawn_mower.start_mowing` when the mower's `activity_mode` transitions to `MODE_PAUSE` and stays there. This is the "kick a stuck mower" one — it fires on state transitions with `for:` durations (2/5/10/15 min into a fresh pause).
+
+### Division of labor
+
+| Scenario | Who handles it |
+|---|---|
+| 09:00 daily attempt | `mower_dispatch` (TRY branch, MODE_READY) |
+| Rain just cleared, mower idle at dock | `mower_dispatch` (TRY branch, MODE_READY) |
+| Rain just cleared, mower still paused at dock | `mower_dispatch` (TRY branch, MODE_PAUSE → resume) |
+| Mower stuck mid-lawn, not at dock | `mower_paused_continue` (its retry pattern) |
+| Mower mid-mow, rain sensor trips, drives home paused | Yuka firmware docks it; when rain clears, `mower_dispatch` sees MODE_PAUSE + dock and resumes |
+| Mower reached dock idle after finishing | `mower_dispatch` (COMPLETED branch — records the completion) |
+
+`mower_dispatch`'s resume branch closes an important gap: `mower_paused_continue`'s triggers are `state → MODE_PAUSE for: 2/5/10/15 min`. If the mower has been in `MODE_PAUSE` for hours (e.g. rain lasted overnight), no new state transition fires and `mower_paused_continue` never re-attempts. Our TRY triggers (09:00 daily + rain-clears) fire on time / event, not on state transitions, so they catch the "stuck overnight" case.
 
 ### `mower_dispatch` — the only automation this package installs
 
-Three triggers, two branches (via `trigger.id`):
+Three triggers, three branches (via `trigger.id` + guards):
 
 ```
 Triggers:
@@ -40,7 +53,7 @@ Triggers:
   id: completed
     - state        activity_mode -> MODE_READY  for 2min   (mow finished)
 
-TRY branch runs when trigger.id == 'try':
+Branch A: START fresh mow  (trigger=try, activity_mode=MODE_READY)
   guards:
     - mowing_automation_enabled = on
     - binary_sensor.mow_blocked = off
@@ -48,10 +61,17 @@ TRY branch runs when trigger.id == 'try':
     - before sunset - 3h
   runtime:
     - next_zone = whichever of {garten, seite} has the OLDER last_mow_1
-    - if spacing_ok (>= 2 days since same zone's last mow):
+    - if spacing_ok (>= 2 days since same zone's last successful mow):
         run script.mow_<next_zone>
 
-COMPLETED branch runs when trigger.id == 'completed':
+Branch B: RESUME paused mow  (trigger=try, activity_mode=MODE_PAUSE)
+  same guards except activity_mode = MODE_PAUSE
+  action:
+    - lawn_mower.start_mowing on the mower entity
+    (Mammotion firmware treats this as "continue paused task", NOT
+     "start new task", so the interrupted zone completes.)
+
+Branch C: COMPLETED — record the completion
   guards:
     - progress >= 100                              (mow actually finished)
     - input_text.last_lawn_mowed in {Garten, Seite}   (we started this mow)
@@ -62,9 +82,9 @@ COMPLETED branch runs when trigger.id == 'completed':
 
 **Why alternation "just works" from timestamps**:
 - `script.mow_lawn` writes `input_text.last_lawn_mowed = "Garten"` but does NOT touch `garten_last_mow_1`.
-- Only the COMPLETED branch (MODE_READY + progress 100) bumps `garten_last_mow_1 = now`.
+- Only the COMPLETED branch bumps `garten_last_mow_1 = now`.
 - Rain-interrupted mow: `garten_last_mow_1` stays at the previous successful timestamp. Next dispatch still picks Garten because its timestamp is older.
-- Successful mow: Garten's timestamp advances → Seite is now older → next dispatch picks Seite.
+- Once Garten actually completes (via Branch B resume, or the Yuka self-resuming, or your `mower_paused_continue`), the COMPLETED trigger fires, Garten's timestamp advances, and Seite becomes the older one.
 
 ### `binary_sensor.mow_blocked` — the on/off gate
 
@@ -107,12 +127,11 @@ Dashboard buttons `Garten jetzt mähen` / `Seite jetzt mähen` call `script.mow_
 
 ## Interaction with `automation.mower_paused_continue`
 
-Your independent automation from before this package. Watches `sensor.yuka_mnu7nps5_activity_mode` for `MODE_PAUSE` and retries via `lawn_mower.start_mowing` up to 3× per stuck event using `input_number.mower_retry_count`. It doesn't overlap with our dispatch:
+Your independent automation. Watches `sensor.yuka_mnu7nps5_activity_mode` for `MODE_PAUSE` state transitions with `for:` 2/5/10/15 min durations, retries via `lawn_mower.start_mowing` up to 3× per stuck event using `input_number.mower_retry_count`, resets the counter on `MODE_WORKING` for 2min or `MODE_READY`.
 
-- Our `mower_dispatch` guard is **`MODE_READY`** — refuses to fire on top of a paused mow.
-- Their `mower_paused_continue` handles resumption from PAUSE.
+**Role**: kick a physically-stuck mower (stuck mid-lawn, wheel jammed, mid-return with error, etc). Fires on freshly-entered PAUSE states.
 
-Together they cover both paths: fresh starts (us) and resume-after-pause (them).
+**Not its role**: resume a mower that's been PAUSE-at-dock for hours. Its state triggers don't re-fire without a new transition. Our `mower_dispatch` Branch B fills that gap by triggering on time/rain-clear events and issuing the same `lawn_mower.start_mowing` when it finds a docked+paused mower.
 
 ## Adding a zone
 

@@ -432,7 +432,7 @@ automation:
     action:
       - choose:
           # =========================================================
-          # TRY branch — start a new mow if guards pass.
+          # Branch A: START a fresh mow (mower idle at dock).
           # =========================================================
           - conditions:
               - condition: trigger
@@ -446,7 +446,6 @@ automation:
               - condition: state
                 entity_id: sensor.yuka_mnu7nps5_activity_mode
                 state: MODE_READY
-              # Sunset cutoff: don't start after sunset - 3h.
               - condition: sun
                 before: sunset
                 before_offset: "-03:00:00"
@@ -471,24 +470,63 @@ automation:
                       - action: "script.mow_{{ next_zone }}"
 
           # =========================================================
-          # COMPLETED branch — record a completion (bump the zone's
+          # Branch B: RESUME a paused mow (mower is at dock in MODE_PAUSE,
+          # typically because rain interrupted an in-progress task).
+          #
+          # lawn_mower.start_mowing is the same command your existing
+          # automation.mower_paused_continue uses to resume. The Mammotion
+          # firmware treats it as "continue the paused task" — it does NOT
+          # start a new task. We do NOT press an Aufgabe button here, which
+          # would start a NEW task and abandon the paused one.
+          #
+          # No spacing check (continuation, not fresh mow). last_lawn_mowed
+          # remains set from the original dispatch so the COMPLETED branch
+          # attributes correctly when the mow finally finishes.
+          #
+          # Rationale for owning this here (vs relying entirely on
+          # mower_paused_continue): that automation triggers on
+          # MODE_PAUSE state transitions with `for:` durations. If the
+          # mower has been paused for hours (rain lasted overnight), no
+          # new transition fires and mower_paused_continue never re-attempts.
+          # This branch fires on our TRY triggers (09:00 daily + rain-clears),
+          # closing that gap.
+          # =========================================================
+          - conditions:
+              - condition: trigger
+                id: try
+              - condition: state
+                entity_id: input_boolean.mowing_automation_enabled
+                state: "on"
+              - condition: state
+                entity_id: binary_sensor.mow_blocked
+                state: "off"
+              - condition: state
+                entity_id: sensor.yuka_mnu7nps5_activity_mode
+                state: MODE_PAUSE
+              - condition: sun
+                before: sunset
+                before_offset: "-03:00:00"
+            sequence:
+              - action: lawn_mower.start_mowing
+                target:
+                  entity_id: lawn_mower.yuka_mnu7nps5
+
+          # =========================================================
+          # Branch C: COMPLETED — record a completion (bump the zone's
           # last_mow_1). This naturally makes the OTHER zone older, so
           # next TRY dispatch picks it.
           # =========================================================
           - conditions:
               - condition: trigger
                 id: completed
-              # Task actually finished (Yuka reports progress=100 at completion).
               - condition: numeric_state
                 entity_id: sensor.yuka_mnu7nps5_progress
                 above: 99
-              # Only attribute completions we started.
               - condition: template
                 value_template: "{{ states('input_text.last_lawn_mowed') in ['Garten', 'Seite'] }}"
             sequence:
               - variables:
                   completed_zone: "{{ 'garten' if states('input_text.last_lawn_mowed') == 'Garten' else 'seite' }}"
-              # Roll history: 3 <- 2, 2 <- 1, 1 <- now.
               - action: input_datetime.set_datetime
                 target:
                   entity_id: "input_datetime.{{ completed_zone }}_last_mow_3"
@@ -504,7 +542,6 @@ automation:
                   entity_id: "input_datetime.{{ completed_zone }}_last_mow_1"
                 data:
                   datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
-              # Clear the marker so subsequent MODE_READY events don't re-record.
               - action: input_text.set_value
                 target:
                   entity_id: input_text.last_lawn_mowed
