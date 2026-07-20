@@ -1,16 +1,11 @@
 # =============================================================================
 # Luba Mower Smart Scheduler — Home Assistant package  (paschdan live install)
 # =============================================================================
-# Personal branch of paschdan/luba-mower-scheduler, refactored to use
-# nielsfaber/scheduler-component for scheduling.
-#
-# ARCHITECTURE
-# ------------
-# scheduler-component schedules toggle a per-zone eligibility helper
-# on/off across a mowing window (e.g. 11:00-18:00). An orchestrator
-# automation (try_mow_when_window_open) watches the helper + rain signals
-# and calls the mowing scripts at the right moment. This gives us proper
-# "retry when rain clears" behavior instead of a fire-and-forget single-shot.
+# Personal branch of paschdan/luba-mower-scheduler, refactored to a SINGLE
+# alternating-dispatch automation. No more scheduler-component schedules,
+# no more per-zone eligibility windows. One `mower_dispatch` automation
+# does everything: rain check, mower-idle check, sunset cutoff, and picks
+# which zone to mow next based on strict A/B alternation.
 #
 # Wired entities in this HA instance:
 #   Mower       : lawn_mower.yuka_mnu7nps5  (Mammotion Yuka)
@@ -23,32 +18,28 @@
 #   Camera      : camera.yuka_mnu7nps5_none
 #
 # =============================================================================
-# WINDOW-BASED SCHEDULING (event-driven, retries on rain-clear)
+# DISPATCH LOGIC (single automation)
 # =============================================================================
-# Each zone has an "eligibility window" helper (STORAGE-MODE, not defined
-# in this YAML — created via UI/API):
+# input_select.next_zone_to_mow tracks whose turn it is (garten or seite).
+# After each successful mow, the automation flips the select to the OTHER
+# zone. Strict A/B alternation regardless of weekday.
 #
-#   input_boolean.garten_mow_window
-#   input_boolean.seite_mow_window
+# The mower_dispatch automation fires:
+#   - Daily at 11:00                     (main attempt)
+#   - When do_not_mow goes on -> off     (retry when rain clears)
 #
-# scheduler-component schedules control these helpers, not the scripts:
+# Guards (all must pass):
+#   - input_boolean.mowing_automation_enabled = on
+#   - input_boolean.do_not_mow             = off
+#   - lawn_mower.yuka_mnu7nps5 NOT in [mowing, returning, unavailable, unknown]
+#   - Before sunset - 3h
+#   - Target zone hasn't mowed today
+#   - Target zone hasn't mowed in the last 2 days (spacing guard)
 #
-#   Garten  Mon/Wed/Fri  11:00->on  18:00->off
-#   Seite   Tue/Thu/Sat  11:00->on  18:00->off
-#
-# The try_mow_when_window_open automation triggers on:
-#   - window helper transitions off -> on   (schedule opened the window)
-#   - do_not_mow          transitions on -> off (rain just cleared)
-#
-# It checks all guards (mowing enabled, do_not_mow off, mower idle, before
-# sunset-3h) AND per zone whether it hasn't already mowed today. Then it
-# calls the wrapper script for each eligible zone.
-#
-# If it rains at 11:00 (window opens, do_not_mow is on -> script guards
-# block), and rain stops at 14:00 (do_not_mow flips off -> automation
-# triggers -> script runs), the zone still gets its mow the same day.
-# If nothing works by 18:00 (window closes) or sunset-3h (cutoff), the
-# day is skipped and the next scheduled day tries again.
+# If all guards pass, the automation calls the wrapper script for the zone
+# named in next_zone_to_mow, waits briefly, then flips the select. If any
+# guard fails, nothing happens and the next trigger (rain-clears or
+# tomorrow's 11:00) tries again.
 #
 # =============================================================================
 # RAIN & DAMP-GRASS HEURISTIC
@@ -88,6 +79,19 @@ input_boolean:
   block_night_mowing:
     name: Block Night Mowing
     icon: mdi:weather-night
+
+
+# -----------------------------------------------------------------------------
+# HELPERS: alternation state
+# -----------------------------------------------------------------------------
+input_select:
+  next_zone_to_mow:
+    name: Next Zone to Mow
+    icon: mdi:swap-horizontal
+    options:
+      - garten
+      - seite
+    initial: seite
 
 
 # -----------------------------------------------------------------------------
@@ -192,7 +196,7 @@ template:
         unique_id: rain_current_hour
         unit_of_measurement: "mm"
         icon: mdi:weather-rainy
-        state_class: measurement  # required for the statistics platform below
+        state_class: measurement
         state: >
           {% set slots = fc['weather.forecast_home'].forecast %}
           {% if slots | count == 0 %}
@@ -256,7 +260,9 @@ script:
           text:
     sequence:
       # ============================================================
-      # UP-FRONT GUARDS
+      # UP-FRONT GUARDS (redundant safety net; mower_dispatch checks
+      # the same conditions upstream, but the script is also called
+      # from the dashboard 'jetzt mähen' buttons which bypass those.)
       # ============================================================
       - condition: state
         entity_id: input_boolean.mowing_automation_enabled
@@ -264,9 +270,6 @@ script:
       - condition: state
         entity_id: input_boolean.do_not_mow
         state: "off"
-      # Mower must be in a state where starting a mow makes sense.
-      # Refuses to press the button if the mower is already out
-      # (mowing / returning) OR is unreachable (unavailable / unknown).
       - condition: not
         conditions:
           - condition: state
@@ -314,7 +317,7 @@ script:
         target:
           entity_id: "{{ zone_button }}"
 
-  # Per-zone wrappers so schedules can pick a no-argument script.
+  # Per-zone wrappers so the dashboard buttons can call a no-argument script.
   mow_garten:
     alias: Mow Garten
     icon: mdi:robot-mower
@@ -506,25 +509,27 @@ automation:
           entity_id: input_boolean.do_not_mow
 
   # ---------------------------------------------------------------------------
-  # Orchestrator: try to mow when the eligibility window is open.
+  # DISPATCHER — the single mowing brain.
+  #
+  # Fires daily at 11:00 AND when do_not_mow clears (rain stopped).
+  # Picks the zone named in input_select.next_zone_to_mow, verifies:
+  #   - all up-front guards (automation on, do_not_mow off, mower idle,
+  #     before sunset - 3h),
+  #   - target zone hasn't mowed today,
+  #   - target zone hasn't mowed in the last 2 days (min spacing),
+  # then runs the wrapper script and flips next_zone_to_mow to the OTHER
+  # zone so the next dispatch alternates.
+  #
+  # If a guard fails, nothing happens and the next dispatch trigger tries
+  # again with the same target zone (no flip on failure).
   # ---------------------------------------------------------------------------
-  - id: try_mow_when_window_open
-    alias: Try Mow When Window Open
-    mode: parallel
-    max: 5
+  - id: mower_dispatch
+    alias: Mower Dispatch
+    mode: single
     trigger:
-      # Window opens (schedule fired at start of eligibility window).
-      - platform: state
-        entity_id: input_boolean.garten_mow_window
-        from: "off"
-        to: "on"
-        id: garten_window
-      - platform: state
-        entity_id: input_boolean.seite_mow_window
-        from: "off"
-        to: "on"
-        id: seite_window
-      # Rain clears (mid-window retry).
+      - platform: time
+        at: "11:00:00"
+        id: daily
       - platform: state
         entity_id: input_boolean.do_not_mow
         from: "on"
@@ -541,36 +546,45 @@ automation:
         conditions:
           - condition: state
             entity_id: lawn_mower.yuka_mnu7nps5
-            state: mowing
-          - condition: state
-            entity_id: lawn_mower.yuka_mnu7nps5
-            state: returning
-      # Sunset cutoff: don't start after sunset - 3h.
+            state:
+              - mowing
+              - returning
+              - unavailable
+              - unknown
       - condition: sun
         before: sunset
         before_offset: "-03:00:00"
     action:
+      - variables:
+          next_zone: "{{ states('input_select.next_zone_to_mow') }}"
+          last_mow_ts: "{{ state_attr('input_datetime.' ~ next_zone ~ '_last_mow_1', 'timestamp') }}"
+          today: "{{ now().date() }}"
+          last_mow_date: >
+            {{ (last_mow_ts | as_datetime | as_local).date() if last_mow_ts else none }}
+          days_since_last: >
+            {{ ((now().timestamp() - last_mow_ts) / 86400) if last_mow_ts else 999 }}
+          # Guard: not mowed today
+          not_mowed_today: >
+            {{ last_mow_date is none or last_mow_date != today }}
+          # Guard: at least 2 days since same zone last mowed
+          # (protects against rain-clears twice in one day, and against
+          # mow-manually-then-schedule-fires-shortly-after.)
+          spacing_ok: >
+            {{ days_since_last | float(999) >= 2.0 }}
+          other_zone: "{{ 'seite' if next_zone == 'garten' else 'garten' }}"
       - choose:
           - conditions:
-              - condition: state
-                entity_id: input_boolean.garten_mow_window
-                state: "on"
               - condition: template
-                value_template: >
-                  {% set ts = state_attr('input_datetime.garten_last_mow_1', 'timestamp') %}
-                  {{ ts is none
-                     or (ts | as_datetime | as_local).date() != now().date() }}
+                value_template: "{{ not_mowed_today and spacing_ok }}"
             sequence:
-              - action: script.mow_garten
-      - choose:
-          - conditions:
-              - condition: state
-                entity_id: input_boolean.seite_mow_window
-                state: "on"
-              - condition: template
-                value_template: >
-                  {% set ts = state_attr('input_datetime.seite_last_mow_1', 'timestamp') %}
-                  {{ ts is none
-                     or (ts | as_datetime | as_local).date() != now().date() }}
-            sequence:
-              - action: script.mow_seite
+              # Run the wrapper for the target zone.
+              - action: "script.mow_{{ next_zone }}"
+              # Give the script a moment to flip lawn_mower state, then
+              # flip the select to the other zone so next dispatch alternates.
+              - delay:
+                  seconds: 5
+              - action: input_select.select_option
+                target:
+                  entity_id: input_select.next_zone_to_mow
+                data:
+                  option: "{{ other_zone }}"
