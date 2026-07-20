@@ -8,6 +8,8 @@ Earlier iterations used [nielsfaber/scheduler-component](https://github.com/niel
 
 Alternation is enforced by `input_select.next_zone_to_mow` (values: `garten` / `seite`). After a successful mow, the automation flips the select to the other zone. If a dispatch attempt fails (rain, mower busy, already mowed today, spacing guard), the select does NOT flip — the same zone tries again on the next trigger.
 
+The daily trigger fires at **09:00** — early enough to catch a dry morning window before typical afternoon rain, late enough to avoid dew and neighbor-noise complaints.
+
 ## Wiring in this branch
 
 | Role | Entity |
@@ -33,7 +35,7 @@ Alternation is enforced by `input_select.next_zone_to_mow` (values: `garten` / `
 │  automation.mower_dispatch                                           │
 │                                                                      │
 │  Triggers:                                                           │
-│   • time: 11:00 daily                                                │
+│   • time: 09:00 daily                                                │
 │   • state: input_boolean.do_not_mow  on -> off  (rain just cleared)  │
 │                                                                      │
 │  Guards (all must pass):                                             │
