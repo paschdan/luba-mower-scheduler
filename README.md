@@ -48,16 +48,18 @@ Three triggers, three branches (via `trigger.id` + guards):
 ```
 Triggers:
   id: try
-    - time         at: 09:00              (daily attempt)
-    - state        binary_sensor.mow_blocked  on -> off   (rain just cleared)
+    - time         at: 09:00                                (daily attempt)
+    - state        binary_sensor.mow_blocked  on -> off     (rain just cleared)
+    - state        sensor.yuka_mnu7nps5_battery -> '100'    (finished charging)
   id: completed
-    - state        activity_mode -> MODE_READY  for 2min   (mow finished)
+    - state        activity_mode -> MODE_READY  for 2min    (mow finished)
 
 Branch A: START fresh mow  (trigger=try, activity_mode=MODE_READY)
   guards:
     - mowing_automation_enabled = on
     - binary_sensor.mow_blocked = off
     - activity_mode             = MODE_READY (docked, idle)
+    - input_text.last_lawn_mowed = ''  (no pending completion attribution)
     - before sunset - 3h
   runtime:
     - next_zone = whichever of {garten, seite} has the OLDER last_mow_1
@@ -80,11 +82,15 @@ Branch C: COMPLETED — record the completion
     - clear input_text.last_lawn_mowed
 ```
 
-**Why alternation "just works" from timestamps**:
-- `script.mow_lawn` writes `input_text.last_lawn_mowed = "Garten"` but does NOT touch `garten_last_mow_1`.
-- Only the COMPLETED branch bumps `garten_last_mow_1 = now`.
-- Rain-interrupted mow: `garten_last_mow_1` stays at the previous successful timestamp. Next dispatch still picks Garten because its timestamp is older.
-- Once Garten actually completes (via Branch B resume, or the Yuka self-resuming, or your `mower_paused_continue`), the COMPLETED trigger fires, Garten's timestamp advances, and Seite becomes the older one.
+**Same-day chaining (Garten finishes → Seite starts)**:
+1. Garten completes → `MODE_READY` → Branch C fires 2 min later. Bumps `garten_last_mow_1 = now`. Clears `last_lawn_mowed`.
+2. Yuka charges back up (typically 1–2h). Battery reaches 100.
+3. `sensor.yuka_mnu7nps5_battery` transitions to `'100'` → `id: try` fires.
+4. Branch A guards check. All pass (`last_lawn_mowed` is now empty; mower is READY; still daylight). Alternation picks Seite (older). Spacing ≥ 2 days (Seite was Jul 16). Runs `script.mow_seite`.
+
+If rain rolls in before charging completes, or it's already past sunset − 3h, Branch A skips and Seite waits until the next `try` trigger (09:00 tomorrow, or an earlier rain-clear if applicable).
+
+**Why the `last_lawn_mowed == ''` guard on Branch A**: prevents a race where the battery-100 trigger fires before Branch C has finished bumping Garten's timestamp. If `last_lawn_mowed` still says `"Garten"`, Branch A refuses to fire and waits for the next trigger — by which time Branch C will have completed and cleared the marker.
 
 ### `binary_sensor.mow_blocked` — the on/off gate
 

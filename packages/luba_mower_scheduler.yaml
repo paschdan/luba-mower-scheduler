@@ -413,7 +413,12 @@ automation:
     alias: Mower Dispatch
     mode: single
     trigger:
-      # TRY: 09:00 daily + rain-clears
+      # TRY: fires whenever it might be time to start (or resume) a mow.
+      #   - Daily at 09:00 (baseline attempt)
+      #   - When rain clears (binary_sensor.mow_blocked on -> off)
+      #   - When battery just finished charging (100% transition) — this is
+      #     what chains 'Garten just finished' -> 'Seite starts' once the
+      #     mower has charged back up from the completed mow.
       - platform: time
         at: "09:00:00"
         id: try
@@ -422,7 +427,11 @@ automation:
         from: "on"
         to: "off"
         id: try
-      # COMPLETED: mower reached READY and stayed there for 2 min
+      - platform: state
+        entity_id: sensor.yuka_mnu7nps5_battery
+        to: "100"
+        id: try
+      # COMPLETED: mower reached READY and stayed there for 2 min.
       - platform: state
         entity_id: sensor.yuka_mnu7nps5_activity_mode
         to: MODE_READY
@@ -446,6 +455,13 @@ automation:
               - condition: state
                 entity_id: sensor.yuka_mnu7nps5_activity_mode
                 state: MODE_READY
+              # No pending completion attribution. When a mow is running (or
+              # just finished before Branch C had a chance to fire), last_
+              # lawn_mowed is set. This guard prevents Branch A from
+              # picking the just-completed zone again in a race with Branch C.
+              - condition: state
+                entity_id: input_text.last_lawn_mowed
+                state: ""
               - condition: sun
                 before: sunset
                 before_offset: "-03:00:00"
@@ -470,26 +486,15 @@ automation:
                       - action: "script.mow_{{ next_zone }}"
 
           # =========================================================
-          # Branch B: RESUME a paused mow (mower is at dock in MODE_PAUSE,
-          # typically because rain interrupted an in-progress task).
+          # Branch B: RESUME a paused mow (mower is at dock in MODE_PAUSE).
           #
-          # lawn_mower.start_mowing is the same command your existing
-          # automation.mower_paused_continue uses to resume. The Mammotion
-          # firmware treats it as "continue the paused task" — it does NOT
-          # start a new task. We do NOT press an Aufgabe button here, which
+          # lawn_mower.start_mowing is what Mammotion treats as 'continue
+          # paused task'. We do NOT press an Aufgabe button here — that
           # would start a NEW task and abandon the paused one.
           #
           # No spacing check (continuation, not fresh mow). last_lawn_mowed
-          # remains set from the original dispatch so the COMPLETED branch
-          # attributes correctly when the mow finally finishes.
-          #
-          # Rationale for owning this here (vs relying entirely on
-          # mower_paused_continue): that automation triggers on
-          # MODE_PAUSE state transitions with `for:` durations. If the
-          # mower has been paused for hours (rain lasted overnight), no
-          # new transition fires and mower_paused_continue never re-attempts.
-          # This branch fires on our TRY triggers (09:00 daily + rain-clears),
-          # closing that gap.
+          # remains set from the original dispatch, so when the mow
+          # eventually completes Branch C attributes to the right zone.
           # =========================================================
           - conditions:
               - condition: trigger
@@ -512,9 +517,16 @@ automation:
                   entity_id: lawn_mower.yuka_mnu7nps5
 
           # =========================================================
-          # Branch C: COMPLETED — record a completion (bump the zone's
-          # last_mow_1). This naturally makes the OTHER zone older, so
-          # next TRY dispatch picks it.
+          # Branch C: COMPLETED — record the completion.
+          #
+          # Bumps the completed zone's last_mow_1 timestamp, which
+          # naturally promotes the OTHER zone to 'older' so the next
+          # Branch A pick will be different.
+          #
+          # Clears input_text.last_lawn_mowed. The battery-100 trigger
+          # will fire once charging completes and Branch A will then
+          # pick up naturally (assuming guards allow — dry, before
+          # sunset-3h, etc.).
           # =========================================================
           - conditions:
               - condition: trigger
