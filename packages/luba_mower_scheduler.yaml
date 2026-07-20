@@ -144,6 +144,20 @@ template:
           {% set ts = state_attr('input_datetime.seite_last_mow_1', 'timestamp') %}
           {% if ts %}{{ ((now().timestamp() - ts) / 86400) | round(0) | int }}{% else %}unknown{% endif %}
 
+      # --- Blade wear ---------------------------------------------------------
+      # Positive value = blade is OVERDUE (mowed longer than the warning
+      # threshold). Negative value = still within budget. The Yuka's
+      # Mammotion integration exposes both raw sensors in hours; this just
+      # subtracts them so the dashboard has a single "how overdue" number.
+      - name: "Yuka Blade Wear Overdue"
+        unique_id: yuka_blade_wear_overdue
+        unit_of_measurement: "h"
+        icon: mdi:saw-blade
+        state: >
+          {% set used = states('sensor.yuka_mnu7nps5_blade_used_time') | float(0) %}
+          {% set warn = states('sensor.yuka_mnu7nps5_blade_wear_warning_time') | float(0) %}
+          {{ (used - warn) | round(1) }}
+
   # --- Rain forecast (Met.no via weather.forecast_home) -----------------------
   # Refreshes every 15 minutes and at HA start; calls weather.get_forecasts
   # and derives three sensors. rain_current_hour also feeds the 3h/6h

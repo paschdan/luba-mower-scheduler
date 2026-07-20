@@ -25,15 +25,36 @@ cards:
         name: Grund
 
   # ---- Mower status -------------------------------------------------------
-  - type: glance
+  - type: entities
     title: Yuka
+    state_color: true
     entities:
       - entity: lawn_mower.yuka_mnu7nps5
         name: Status
+      - entity: sensor.yuka_mnu7nps5_activity_mode
+        name: Aktivität
       - entity: sensor.yuka_mnu7nps5_battery
         name: Akku
+      - entity: binary_sensor.yuka_mnu7nps5_charging
+        name: Lädt
+      - entity: sensor.yuka_mnu7nps5_progress
+        name: Fortschritt
+      - entity: sensor.yuka_mnu7nps5_time_left
+        name: Restzeit (min)
+      - entity: sensor.yuka_mnu7nps5_elapsed_time
+        name: Vergangene Zeit (min)
+      - entity: sensor.yuka_mnu7nps5_area
+        name: Fläche (m²)
       - entity: input_text.last_lawn_mowed
         name: Letzte Fläche
+      - entity: sensor.yuka_mnu7nps5_last_error
+        name: Letzter Fehler
+      - entity: sensor.yuka_mnu7nps5_last_error_time
+        name: Fehler-Zeit
+      - entity: sensor.yuka_mnu7nps5_blade_used_time
+        name: Klingen-Laufzeit (h)
+      - entity: sensor.yuka_blade_wear_overdue
+        name: Klinge überfällig (h)
 
   # ---- Weather ------------------------------------------------------------
   - type: entities
