@@ -1,11 +1,14 @@
 # =============================================================================
 # Luba Mower Smart Scheduler — Home Assistant package  (paschdan live install)
 # =============================================================================
-# Personal branch of paschdan/luba-mower-scheduler, refactored to a SINGLE
-# alternating-dispatch automation. No more scheduler-component schedules,
-# no more per-zone eligibility windows. One `mower_dispatch` automation
-# does everything: rain check, mower-idle check, sunset cutoff, and picks
-# which zone to mow next based on strict A/B alternation.
+# Single-automation setup: one mower_dispatch automation handles both
+# "start a new mow" and "record a completion". Alternation between zones
+# is DERIVED from the last-mow timestamps (whichever zone was mowed longest
+# ago gets the next slot) — no separate alternation state variable.
+#
+# All rain / night / weather gating is folded into ONE template
+# binary_sensor (binary_sensor.mow_blocked) with a companion text sensor
+# (sensor.mow_block_reason) showing which signal is triggering the block.
 #
 # Wired entities in this HA instance:
 #   Mower       : lawn_mower.yuka_mnu7nps5  (Mammotion Yuka)
@@ -18,47 +21,93 @@
 #   Camera      : camera.yuka_mnu7nps5_none
 #
 # =============================================================================
-# DISPATCH LOGIC (single automation)
+# ARCHITECTURE — ONE AUTOMATION
 # =============================================================================
-# input_select.next_zone_to_mow tracks whose turn it is (garten or seite).
-# After each successful mow, the automation flips the select to the OTHER
-# zone. Strict A/B alternation regardless of weekday.
+# mower_dispatch has three triggers, branched by trigger.id:
 #
-# The mower_dispatch automation fires:
-#   - Daily at 11:00                     (main attempt)
-#   - When do_not_mow goes on -> off     (retry when rain clears)
+#   trigger.id: try
+#     - platform: time         at: 09:00        (daily attempt)
+#     - platform: state        binary_sensor.mow_blocked on -> off  (rain cleared)
+#     → runs 'try' action branch
 #
-# Guards (all must pass):
+#   trigger.id: completed
+#     - platform: state        sensor.yuka_mnu7nps5_activity_mode -> MODE_READY  for 2 min
+#     → runs 'completed' action branch
+#
+# TRY branch guards (all must pass):
 #   - input_boolean.mowing_automation_enabled = on
-#   - input_boolean.do_not_mow             = off
-#   - lawn_mower.yuka_mnu7nps5 NOT in [mowing, returning, unavailable, unknown]
+#   - binary_sensor.mow_blocked               = off
+#   - sensor.yuka_mnu7nps5_activity_mode      = MODE_READY  (docked, idle)
 #   - Before sunset - 3h
-#   - Target zone hasn't mowed today
-#   - Target zone hasn't mowed in the last 2 days (spacing guard)
 #
-# If all guards pass, the automation calls the wrapper script for the zone
-# named in next_zone_to_mow, waits briefly, then flips the select. If any
-# guard fails, nothing happens and the next trigger (rain-clears or
-# tomorrow's 11:00) tries again.
+# TRY branch action:
+#   Pick next zone = whichever of {garten, seite} has the OLDER _last_mow_1
+#   timestamp. Check spacing (≥ 2 days since same zone last completed). If
+#   OK, call script.mow_<zone>.
+#
+# COMPLETED branch guards:
+#   - sensor.yuka_mnu7nps5_progress >= 100  (task actually finished)
+#   - input_text.last_lawn_mowed in ['Garten', 'Seite']
+#     (i.e. our script started this mow — the marker is our attribution
+#     handle; empty marker = we didn't dispatch, don't record)
+#
+# COMPLETED branch action:
+#   Roll the completed zone's history (last_mow_3 <- 2, 2 <- 1, 1 <- now).
+#   That advances the zone's timestamp, so next TRY dispatch will pick the
+#   OTHER zone (natural alternation from timestamps). Clear last_lawn_mowed
+#   marker so subsequent MODE_READY events (mower re-docks after storm, HA
+#   restart, ...) don't re-record.
+#
+# Rain-interrupt behavior:
+#   - Garten dispatched at 09:00. script.mow_lawn only sets last_lawn_mowed;
+#     it does NOT bump garten_last_mow_1. So Garten's timestamp is still the
+#     PREVIOUS successful completion (e.g. 4 days ago).
+#   - Rain forces mower into MODE_PAUSE. mower_paused_continue (your
+#     independent automation) handles resumption attempts.
+#   - If mow completes: MODE_READY → mower_dispatch completed branch fires
+#     → garten_last_mow_1 = now → Seite is now the older one → tomorrow's
+#     TRY picks Seite.
+#   - If mow never completes today: garten_last_mow_1 stays at "4 days ago",
+#     so tomorrow's TRY still picks Garten. It keeps trying until it
+#     completes. Alternation is preserved.
 #
 # =============================================================================
-# RAIN & DAMP-GRASS HEURISTIC
+# WHAT'S HERE
 # =============================================================================
-# Six signals gate mowing. Mowing is blocked (do_not_mow turns ON) when
-# ANY of these is true:
+# - 3 input_boolean helpers (mowing_automation_enabled, do_not_mow (legacy,
+#   unused), block_night_mowing)
+# - 6 input_datetime helpers (garten/seite _last_mow_1/2/3)
+# - 2 input_text helpers (last_lawn_mowed, reason_no_mow (legacy, unused))
+# - Template sensors:
+#     - Garten/Seite Days Since Mow
+#     - Yuka Blade Wear Overdue
+#     - Rain Today / Rain Probability / Rain Current Hour (trigger-based)
+#     - Mow Block Reason (state-based)
+# - Template binary_sensor: Mow Blocked
+# - Legacy-platform sensors: Rain Last 3h / Rain Last 6h (statistics)
+# - 3 scripts (mow_lawn parameterized + mow_garten/mow_seite wrappers)
+# - 1 automation (mower_dispatch)
 #
-#   sensor.rain_today        > 3 mm     forecast for today (whole-day sum)
-#   sensor.rain_probability  > 50 %     fraction of today's forecast hours
-#                                       with any predicted precipitation
-#   sensor.rain_current_hour > 0.5 mm   forecast for the current hour
-#   sensor.rain_last_3h      > 5 mm     rolling-sum, grass likely damp
-#   sensor.rain_last_6h      > 25 mm    rolling-sum, heavy rain earlier today
+# NOTE: input_boolean.do_not_mow and input_text.reason_no_mow are LEGACY —
+# defined here but no longer written by any automation. Kept in the YAML so
+# HA still creates them (users may have dashboard rows referencing them);
+# can be removed once you've cleaned dashboard references.
+#
+# =============================================================================
+# RAIN & DAMP-GRASS HEURISTIC (unchanged from previous version)
+# =============================================================================
+# Six signals feed binary_sensor.mow_blocked. Mowing is blocked when ANY:
+#   sensor.rain_today        > 3 mm     forecast for today
+#   sensor.rain_probability  > 50 %     fraction of today's rain hours
+#   sensor.rain_current_hour > 0.5 mm   current hour forecast
+#   sensor.rain_last_3h      > 5 mm     rolling-sum damp grass
+#   sensor.rain_last_6h      > 25 mm    rolling-sum heavy rain earlier
 #   weather.forecast_home in {rainy, pouring, lightning-rainy, lightning,
 #                             hail, snowy, snowy-rainy}
+#   PLUS night block: block_night_mowing = on AND (sun below horizon OR
+#                     within 1h of next sunset).
 #
-# The 3h/6h rolling sums are the "damp grass" fix: even after rain stops,
-# the grass stays wet for a while. Approach inspired by simon42.com's Luba-2
-# automation, adjusted for Met.no's hourly forecast shape.
+# Approach inspired by simon42.com's Luba-2 automation, adjusted for Met.no.
 # =============================================================================
 
 
@@ -70,33 +119,24 @@ input_boolean:
     name: Mowing Automation Enabled
     icon: mdi:robot-mower
 
-  do_not_mow:
-    name: Do Not Mow
-    icon: mdi:robot-mower-off
-    # Auto-managed by rain/night automations. Turn on manually to pause mowing.
-    # This is an INTERLOCK (on = blocked). Read: "off = green light".
-
   block_night_mowing:
     name: Block Night Mowing
     icon: mdi:weather-night
 
-
-# -----------------------------------------------------------------------------
-# HELPERS: alternation state
-# -----------------------------------------------------------------------------
-input_select:
-  next_zone_to_mow:
-    name: Next Zone to Mow
-    icon: mdi:swap-horizontal
-    options:
-      - garten
-      - seite
-    initial: seite
+  # LEGACY — no longer written by any automation. Kept only so old dashboard
+  # entries don't break. Remove once you've cleaned dashboard references
+  # (they should point at binary_sensor.mow_blocked instead).
+  do_not_mow:
+    name: Do Not Mow (legacy, unused)
+    icon: mdi:robot-mower-off
 
 
 # -----------------------------------------------------------------------------
 # HELPERS: per-zone rolling mow-history
 #   <zone>_last_mow_1/2/3 = rolling history of the last three mows (1 = newest)
+#
+# Bumped only in mower_dispatch's 'completed' branch, so the timestamp
+# reflects the last SUCCESSFUL mow, not the last DISPATCH attempt.
 # -----------------------------------------------------------------------------
 input_datetime:
   garten_last_mow_1: { name: Garten Last Mow 1, has_date: true, has_time: true }
@@ -111,22 +151,26 @@ input_datetime:
 # HELPERS: dashboard-facing text
 # -----------------------------------------------------------------------------
 input_text:
-  reason_no_mow:
-    name: Reason No Mow
-    initial: ""
-    max: 100
-
   last_lawn_mowed:
     name: Last Lawn Mowed
     initial: ""
     max: 100
+    # Set by script.mow_lawn on dispatch. Read by mower_dispatch's completed
+    # branch to know which zone to credit on MODE_READY.
+
+  # LEGACY — replaced by sensor.mow_block_reason. Kept for old dashboard
+  # references. Remove when dashboard is cleaned up.
+  reason_no_mow:
+    name: Reason No Mow (legacy, unused)
+    initial: ""
+    max: 100
 
 
 # -----------------------------------------------------------------------------
-# TEMPLATE SENSORS
+# TEMPLATE SENSORS + BINARY_SENSOR
 # -----------------------------------------------------------------------------
 template:
-  # --- Per-zone days-since-mow ------------------------------------------------
+  # --- State-based (updates whenever any source entity changes) --------------
   - sensor:
       - name: "Garten Days Since Mow"
         unique_id: garten_days_since_mow
@@ -144,11 +188,8 @@ template:
           {% set ts = state_attr('input_datetime.seite_last_mow_1', 'timestamp') %}
           {% if ts %}{{ ((now().timestamp() - ts) / 86400) | round(0) | int }}{% else %}unknown{% endif %}
 
-      # --- Blade wear ---------------------------------------------------------
-      # Positive value = blade is OVERDUE (mowed longer than the warning
-      # threshold). Negative value = still within budget. The Yuka's
-      # Mammotion integration exposes both raw sensors in hours; this just
-      # subtracts them so the dashboard has a single "how overdue" number.
+      # Blade wear: positive value = OVERDUE (mowed longer than warning
+      # threshold). Negative = still within budget.
       - name: "Yuka Blade Wear Overdue"
         unique_id: yuka_blade_wear_overdue
         unit_of_measurement: "h"
@@ -158,10 +199,53 @@ template:
           {% set warn = states('sensor.yuka_mnu7nps5_blade_wear_warning_time') | float(0) %}
           {{ (used - warn) | round(1) }}
 
-  # --- Rain forecast (Met.no via weather.forecast_home) -----------------------
-  # Refreshes every 15 minutes and at HA start; calls weather.get_forecasts
-  # and derives three sensors. rain_current_hour also feeds the 3h/6h
-  # rolling statistics sensors (see the top-level `sensor:` block below).
+      # Reason string — which signal is currently blocking the mow (empty
+      # if nothing is blocking).
+      - name: "Mow Block Reason"
+        unique_id: mow_block_reason
+        icon: mdi:information-outline
+        state: >
+          {% set c = states('weather.forecast_home') %}
+          {% set now_h = states('sensor.rain_current_hour') | float(0) %}
+          {% set l3 = states('sensor.rain_last_3h') | float(0) %}
+          {% set l6 = states('sensor.rain_last_6h') | float(0) %}
+          {% set td = states('sensor.rain_today') | float(0) %}
+          {% set pb = states('sensor.rain_probability') | float(0) %}
+          {% set night = is_state('input_boolean.block_night_mowing','on') and (
+              is_state('sun.sun','below_horizon') or
+              (as_timestamp(state_attr('sun.sun','next_setting') or 0) - as_timestamp(now())) < 3600
+            ) %}
+          {% if night %}night time
+          {% elif c in ['rainy','pouring','lightning-rainy','lightning','hail','snowy','snowy-rainy'] %}raining ({{ c }})
+          {% elif now_h > 0.5 %}raining now ({{ now_h }}mm/h)
+          {% elif l3 > 5 %}wet grass ({{ l3 }}mm last 3h)
+          {% elif l6 > 25 %}wet grass ({{ l6 }}mm last 6h)
+          {% elif td > 3 %}rain today ({{ td }}mm forecast)
+          {% elif pb > 50 %}rain soon ({{ pb }}%)
+          {% else %}
+          {% endif %}
+
+    binary_sensor:
+      # THE mowing gate. On = blocked. Off = mow-allowed.
+      # OR of all rain signals + night block.
+      - name: "Mow Blocked"
+        unique_id: mow_blocked
+        icon: mdi:robot-mower-off
+        state: >
+          {% set rain_today = states('sensor.rain_today') | float(0) > 3 %}
+          {% set rain_prob  = states('sensor.rain_probability') | float(0) > 50 %}
+          {% set rain_now   = states('sensor.rain_current_hour') | float(0) > 0.5 %}
+          {% set rain_3h    = states('sensor.rain_last_3h') | float(0) > 5 %}
+          {% set rain_6h    = states('sensor.rain_last_6h') | float(0) > 25 %}
+          {% set weather_wet = states('weather.forecast_home') in
+             ['rainy','pouring','lightning-rainy','lightning','hail','snowy','snowy-rainy'] %}
+          {% set night_block = is_state('input_boolean.block_night_mowing','on') and (
+              is_state('sun.sun','below_horizon') or
+              (as_timestamp(state_attr('sun.sun','next_setting') or 0) - as_timestamp(now())) < 3600
+            ) %}
+          {{ rain_today or rain_prob or rain_now or rain_3h or rain_6h or weather_wet or night_block }}
+
+  # --- Trigger-based (poll Met.no forecast every 15 min) ---------------------
   - trigger:
       - platform: time_pattern
         minutes: "/15"
@@ -200,9 +284,7 @@ template:
           {% if slots | count == 0 %}
             0
           {% else %}
-            {% set wet = slots
-               | selectattr('precipitation', '>', 0)
-               | list | count %}
+            {% set wet = slots | selectattr('precipitation', '>', 0) | list | count %}
             {{ ((wet / (slots | count)) * 100) | round(0) | int }}
           {% endif %}
 
@@ -222,9 +304,6 @@ template:
 
 # -----------------------------------------------------------------------------
 # LEGACY-PLATFORM SENSORS: rolling-window rain statistics
-#
-# HA's built-in statistics platform. Adding or changing these requires a
-# full HA restart (they don't hot-reload).
 # -----------------------------------------------------------------------------
 sensor:
   - platform: statistics
@@ -257,7 +336,7 @@ script:
     max: 5
     fields:
       zone_slug:
-        description: "Zone slug used to derive helper entity ids (garten, seite, ...)"
+        description: "Zone slug (garten, seite, ...) — used to build helper entity IDs"
         example: "garten"
         selector:
           text:
@@ -268,61 +347,27 @@ script:
           entity:
             domain: button
       zone_label:
-        description: "Human-readable label for dashboards / notifications"
+        description: "Human-readable label (used to attribute completions)"
         example: "Garten"
         selector:
           text:
     sequence:
       # ============================================================
-      # UP-FRONT GUARDS (redundant safety net; mower_dispatch checks
-      # the same conditions upstream, but the script is also called
-      # from the dashboard 'jetzt mähen' buttons which bypass those.)
+      # Guards (mirror of mower_dispatch's TRY branch — the dashboard
+      # 'jetzt mähen' button can call this script directly).
       # ============================================================
       - condition: state
         entity_id: input_boolean.mowing_automation_enabled
         state: "on"
       - condition: state
-        entity_id: input_boolean.do_not_mow
+        entity_id: binary_sensor.mow_blocked
         state: "off"
-      # Mower must be idle at the dock. MODE_READY is the only Yuka
-      # state where starting a fresh mow makes sense. Other states:
-      #   MODE_WORKING   -> already mowing
-      #   MODE_RETURNING -> heading back to dock
-      #   MODE_PAUSE     -> interrupted mow (rain / stuck) — let
-      #                     automation.mower_paused_continue resume it
-      #                     rather than starting a new task
-      #   MODE_CHARGING  -> if it ever appears
-      #   unavailable/unknown -> integration disconnected
       - condition: state
         entity_id: sensor.yuka_mnu7nps5_activity_mode
         state: MODE_READY
 
-      # ============================================================
-      # Per-zone entity-id bindings (derived from zone_slug field)
-      # ============================================================
-      - variables:
-          e_last_1: "input_datetime.{{ zone_slug }}_last_mow_1"
-          e_last_2: "input_datetime.{{ zone_slug }}_last_mow_2"
-          e_last_3: "input_datetime.{{ zone_slug }}_last_mow_3"
-
-      # Roll last-mow history (3 <- 2, 2 <- 1, 1 <- now).
-      - action: input_datetime.set_datetime
-        target:
-          entity_id: "{{ e_last_3 }}"
-        data:
-          datetime: "{{ states(e_last_2) }}"
-      - action: input_datetime.set_datetime
-        target:
-          entity_id: "{{ e_last_2 }}"
-        data:
-          datetime: "{{ states(e_last_1) }}"
-      - action: input_datetime.set_datetime
-        target:
-          entity_id: "{{ e_last_1 }}"
-        data:
-          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
-
-      # Record which lawn just started.
+      # Record which zone we just dispatched. mower_dispatch's completed
+      # branch reads this to know which timestamp to bump on MODE_READY.
       - action: input_text.set_value
         target:
           entity_id: input_text.last_lawn_mowed
@@ -334,7 +379,7 @@ script:
         target:
           entity_id: "{{ zone_button }}"
 
-  # Per-zone wrappers so the dashboard buttons can call a no-argument script.
+  # Per-zone wrappers so schedules/dashboard buttons can call a no-argument script.
   mow_garten:
     alias: Mow Garten
     icon: mdi:robot-mower
@@ -361,285 +406,107 @@ script:
 
 
 # -----------------------------------------------------------------------------
-# AUTOMATIONS
+# AUTOMATIONS — just ONE, with two trigger-id branches
 # -----------------------------------------------------------------------------
 automation:
-  # ---------------------------------------------------------------------------
-  # Rain / damp grass — block mowing.
-  # ---------------------------------------------------------------------------
-  - id: do_not_mow_if_rain
-    alias: Do Not Mow if Rain
-    mode: restart
-    trigger:
-      - platform: time_pattern
-        minutes: "/15"
-    condition:
-      - condition: or
-        conditions:
-          - condition: template
-            value_template: >
-              {{ states('sensor.rain_today') | float(0) > 3 }}
-          - condition: template
-            value_template: >
-              {{ states('sensor.rain_probability') | float(0) > 50 }}
-          - condition: template
-            value_template: >
-              {{ states('sensor.rain_current_hour') | float(0) > 0.5 }}
-          - condition: template
-            value_template: >
-              {{ states('sensor.rain_last_3h') | float(0) > 5 }}
-          - condition: template
-            value_template: >
-              {{ states('sensor.rain_last_6h') | float(0) > 25 }}
-          - condition: state
-            entity_id: weather.forecast_home
-            state:
-              - rainy
-              - pouring
-              - lightning-rainy
-              - lightning
-              - hail
-              - snowy
-              - snowy-rainy
-    action:
-      - action: input_boolean.turn_on
-        target:
-          entity_id: input_boolean.do_not_mow
-      - action: input_text.set_value
-        target:
-          entity_id: input_text.reason_no_mow
-        data:
-          value: >
-            {% set c = states('weather.forecast_home') %}
-            {% set now_h = states('sensor.rain_current_hour') | float(0) %}
-            {% set l3 = states('sensor.rain_last_3h') | float(0) %}
-            {% set l6 = states('sensor.rain_last_6h') | float(0) %}
-            {% set td = states('sensor.rain_today') | float(0) %}
-            {% set pb = states('sensor.rain_probability') | float(0) %}
-            {% if c in ['rainy','pouring','lightning-rainy','lightning','hail','snowy','snowy-rainy'] %}raining ({{ c }})
-            {% elif now_h > 0.5 %}raining now ({{ now_h }}mm/h)
-            {% elif l3 > 5 %}wet grass ({{ l3 }}mm last 3h)
-            {% elif l6 > 25 %}wet grass ({{ l6 }}mm last 6h)
-            {% elif td > 3 %}rain today ({{ td }}mm forecast)
-            {% else %}rain soon ({{ pb }}%)
-            {% endif %}
-
-  # ---------------------------------------------------------------------------
-  # Reset do_not_mow when ALL rain signals dry (mid-day only).
-  # ---------------------------------------------------------------------------
-  - id: reset_do_not_mow_if_dry
-    alias: Reset Do Not Mow if Dry
-    mode: single
-    trigger:
-      - platform: time_pattern
-        minutes: "/15"
-    condition:
-      - condition: sun
-        after: sunrise
-        after_offset: "01:00:00"
-        before: sunset
-        before_offset: "-01:00:00"
-      - condition: template
-        value_template: >
-          {{ states('sensor.rain_today') | float(0) <= 3
-             and states('sensor.rain_probability') | float(0) <= 50
-             and states('sensor.rain_current_hour') | float(0) <= 0.5
-             and states('sensor.rain_last_3h') | float(0) <= 5
-             and states('sensor.rain_last_6h') | float(0) <= 25 }}
-      - condition: not
-        conditions:
-          - condition: state
-            entity_id: weather.forecast_home
-            state:
-              - rainy
-              - pouring
-              - lightning-rainy
-              - lightning
-              - hail
-              - snowy
-              - snowy-rainy
-    action:
-      - action: input_boolean.turn_off
-        target:
-          entity_id: input_boolean.do_not_mow
-
-  # ---------------------------------------------------------------------------
-  # Night block.
-  # ---------------------------------------------------------------------------
-  - id: block_mowing_at_night
-    alias: Block Mowing at Night
-    mode: single
-    trigger:
-      - platform: sun
-        event: sunset
-        offset: "-01:00:00"
-    condition:
-      - condition: state
-        entity_id: input_boolean.block_night_mowing
-        state: "on"
-    action:
-      - action: input_boolean.turn_on
-        target:
-          entity_id: input_boolean.do_not_mow
-      - action: input_text.set_value
-        target:
-          entity_id: input_text.reason_no_mow
-        data:
-          value: night time
-
-  # ---------------------------------------------------------------------------
-  # Clear at sunrise (only if grass is also dry).
-  # ---------------------------------------------------------------------------
-  - id: allow_mowing_at_sunrise
-    alias: Allow Mowing at Sunrise
-    mode: single
-    trigger:
-      - platform: sun
-        event: sunrise
-        offset: "01:00:00"
-    condition:
-      - condition: state
-        entity_id: input_boolean.block_night_mowing
-        state: "on"
-      - condition: template
-        value_template: >
-          {{ states('sensor.rain_today') | float(0) <= 3
-             and states('sensor.rain_probability') | float(0) <= 50
-             and states('sensor.rain_current_hour') | float(0) <= 0.5
-             and states('sensor.rain_last_3h') | float(0) <= 5
-             and states('sensor.rain_last_6h') | float(0) <= 25 }}
-      - condition: not
-        conditions:
-          - condition: state
-            entity_id: weather.forecast_home
-            state:
-              - rainy
-              - pouring
-              - lightning-rainy
-              - lightning
-              - hail
-              - snowy
-              - snowy-rainy
-    action:
-      - action: input_boolean.turn_off
-        target:
-          entity_id: input_boolean.do_not_mow
-
-  # ---------------------------------------------------------------------------
-  # DISPATCHER — the single mowing brain.
-  #
-  # Fires daily at 11:00 AND when do_not_mow clears (rain stopped).
-  # Picks the zone named in input_select.next_zone_to_mow, verifies:
-  #   - all up-front guards (automation on, do_not_mow off, mower idle,
-  #     before sunset - 3h),
-  #   - target zone hasn't mowed today,
-  #   - target zone hasn't mowed in the last 2 days (min spacing),
-  # then runs the wrapper script and flips next_zone_to_mow to the OTHER
-  # zone so the next dispatch alternates.
-  #
-  # If a guard fails, nothing happens and the next dispatch trigger tries
-  # again with the same target zone (no flip on failure).
-  # ---------------------------------------------------------------------------
   - id: mower_dispatch
     alias: Mower Dispatch
     mode: single
     trigger:
+      # TRY: 09:00 daily + rain-clears
       - platform: time
         at: "09:00:00"
-        id: daily
+        id: try
       - platform: state
-        entity_id: input_boolean.do_not_mow
+        entity_id: binary_sensor.mow_blocked
         from: "on"
         to: "off"
-        id: dry
-    condition:
-      - condition: state
-        entity_id: input_boolean.mowing_automation_enabled
-        state: "on"
-      - condition: state
-        entity_id: input_boolean.do_not_mow
-        state: "off"
-      # Mower must be idle at the dock. Anything else (WORKING, PAUSE,
-      # RETURNING, ...) means either a mow is in progress or was
-      # interrupted; let automation.mower_paused_continue resume paused
-      # tasks, don't fire a fresh Aufgabe on top.
-      - condition: state
-        entity_id: sensor.yuka_mnu7nps5_activity_mode
-        state: MODE_READY
-      # Sunset cutoff: don't start after sunset - 3h.
-      - condition: sun
-        before: sunset
-        before_offset: "-03:00:00"
-    action:
-      - variables:
-          next_zone: "{{ states('input_select.next_zone_to_mow') }}"
-          last_mow_ts: "{{ state_attr('input_datetime.' ~ next_zone ~ '_last_mow_1', 'timestamp') }}"
-          today: "{{ now().date() }}"
-          last_mow_date: >
-            {{ (last_mow_ts | as_datetime | as_local).date() if last_mow_ts else none }}
-          days_since_last: >
-            {{ ((now().timestamp() - last_mow_ts) / 86400) if last_mow_ts else 999 }}
-          # Guard: not mowed today
-          not_mowed_today: >
-            {{ last_mow_date is none or last_mow_date != today }}
-          # Guard: at least 2 days since same zone last mowed
-          # (protects against rain-clears twice in one day, and against
-          # mow-manually-then-schedule-fires-shortly-after.)
-          spacing_ok: >
-            {{ days_since_last | float(999) >= 2.0 }}
-      - choose:
-          - conditions:
-              - condition: template
-                value_template: "{{ not_mowed_today and spacing_ok }}"
-            sequence:
-              # Run the wrapper for the target zone. Alternation is NOT
-              # flipped here — that happens in mower_completion_tracker
-              # when the mower actually finishes (MODE_READY + progress 100).
-              # This way a rain-interrupted mow keeps its 'turn' until it
-              # genuinely completes.
-              - action: "script.mow_{{ next_zone }}"
-
-  # ---------------------------------------------------------------------------
-  # Completion tracker — flip alternation when a mow actually finishes.
-  #
-  # Fires when sensor.yuka_mnu7nps5_activity_mode transitions to MODE_READY
-  # (the Yuka is home, docked, task complete) and stays there for 2 min so
-  # we ignore transient blips during dock approach.
-  #
-  # Only counts as 'a completion we should attribute' if:
-  #   - progress >= 100  (the task actually finished, not manually docked
-  #                       or interrupted with the mower somehow still
-  #                       reaching READY)
-  #   - input_text.last_lawn_mowed is 'Garten' or 'Seite' (i.e. our script
-  #     just started a mow — this marker gets cleared here at the end so
-  #     we don't re-flip if the mower re-docks later).
-  # ---------------------------------------------------------------------------
-  - id: mower_completion_tracker
-    alias: Mower Completion Tracker
-    mode: single
-    trigger:
+        id: try
+      # COMPLETED: mower reached READY and stayed there for 2 min
       - platform: state
         entity_id: sensor.yuka_mnu7nps5_activity_mode
         to: MODE_READY
         for:
           minutes: 2
-    condition:
-      - condition: numeric_state
-        entity_id: sensor.yuka_mnu7nps5_progress
-        above: 99
-      - condition: template
-        value_template: "{{ states('input_text.last_lawn_mowed') in ['Garten', 'Seite'] }}"
+        id: completed
     action:
-      # Flip next_zone_to_mow to the OTHER of the zone just completed.
-      - action: input_select.select_option
-        target:
-          entity_id: input_select.next_zone_to_mow
-        data:
-          option: >-
-            {% if states('input_text.last_lawn_mowed') == 'Garten' %}seite{% else %}garten{% endif %}
-      # Clear the marker so subsequent MODE_READY events don't re-flip.
-      - action: input_text.set_value
-        target:
-          entity_id: input_text.last_lawn_mowed
-        data:
-          value: ""
+      - choose:
+          # =========================================================
+          # TRY branch — start a new mow if guards pass.
+          # =========================================================
+          - conditions:
+              - condition: trigger
+                id: try
+              - condition: state
+                entity_id: input_boolean.mowing_automation_enabled
+                state: "on"
+              - condition: state
+                entity_id: binary_sensor.mow_blocked
+                state: "off"
+              - condition: state
+                entity_id: sensor.yuka_mnu7nps5_activity_mode
+                state: MODE_READY
+              # Sunset cutoff: don't start after sunset - 3h.
+              - condition: sun
+                before: sunset
+                before_offset: "-03:00:00"
+            sequence:
+              - variables:
+                  # Alternation by timestamp: pick whichever zone was last
+                  # SUCCESSFULLY mowed longer ago. Because last_mow_1 is bumped
+                  # only in the COMPLETED branch below (not on dispatch), a
+                  # rain-interrupted attempt does NOT lose alternation.
+                  garten_ts: "{{ state_attr('input_datetime.garten_last_mow_1','timestamp') | float(0) }}"
+                  seite_ts:  "{{ state_attr('input_datetime.seite_last_mow_1','timestamp')  | float(0) }}"
+                  next_zone: "{{ 'garten' if garten_ts <= seite_ts else 'seite' }}"
+                  target_ts: "{{ garten_ts if next_zone == 'garten' else seite_ts }}"
+                  days_since: "{{ ((now().timestamp() - target_ts) / 86400) if target_ts else 999 }}"
+                  # Spacing: at least 2 days since same zone's last SUCCESSFUL mow.
+                  spacing_ok: "{{ days_since | float(999) >= 2.0 }}"
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ spacing_ok }}"
+                    sequence:
+                      - action: "script.mow_{{ next_zone }}"
+
+          # =========================================================
+          # COMPLETED branch — record a completion (bump the zone's
+          # last_mow_1). This naturally makes the OTHER zone older, so
+          # next TRY dispatch picks it.
+          # =========================================================
+          - conditions:
+              - condition: trigger
+                id: completed
+              # Task actually finished (Yuka reports progress=100 at completion).
+              - condition: numeric_state
+                entity_id: sensor.yuka_mnu7nps5_progress
+                above: 99
+              # Only attribute completions we started.
+              - condition: template
+                value_template: "{{ states('input_text.last_lawn_mowed') in ['Garten', 'Seite'] }}"
+            sequence:
+              - variables:
+                  completed_zone: "{{ 'garten' if states('input_text.last_lawn_mowed') == 'Garten' else 'seite' }}"
+              # Roll history: 3 <- 2, 2 <- 1, 1 <- now.
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: "input_datetime.{{ completed_zone }}_last_mow_3"
+                data:
+                  datetime: "{{ states('input_datetime.' ~ completed_zone ~ '_last_mow_2') }}"
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: "input_datetime.{{ completed_zone }}_last_mow_2"
+                data:
+                  datetime: "{{ states('input_datetime.' ~ completed_zone ~ '_last_mow_1') }}"
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: "input_datetime.{{ completed_zone }}_last_mow_1"
+                data:
+                  datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+              # Clear the marker so subsequent MODE_READY events don't re-record.
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.last_lawn_mowed
+                data:
+                  value: ""

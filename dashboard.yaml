@@ -15,13 +15,11 @@ cards:
     entities:
       - entity: input_boolean.mowing_automation_enabled
         name: Scheduler aktiv
-      - entity: input_boolean.do_not_mow
-        name: Nicht mähen (auto - Regen/Nacht)
+      - entity: binary_sensor.mow_blocked
+        name: Mähen blockiert (auto)
       - entity: input_boolean.block_night_mowing
         name: Nachts blockieren
-      - entity: input_select.next_zone_to_mow
-        name: Nächste Zone
-      - entity: input_text.reason_no_mow
+      - entity: sensor.mow_block_reason
         name: Grund
 
   # ---- Mower status -------------------------------------------------------
