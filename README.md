@@ -6,9 +6,26 @@
 
 Earlier iterations used [nielsfaber/scheduler-component](https://github.com/nielsfaber/scheduler-component) + a window-based orchestrator automation. That worked but felt over-architected for two zones with strict alternation. This iteration collapses everything into **one automation** (`mower_dispatch`) plus the four rain/night automations that manage `input_boolean.do_not_mow`.
 
-Alternation is enforced by `input_select.next_zone_to_mow` (values: `garten` / `seite`). After a successful mow, the automation flips the select to the other zone. If a dispatch attempt fails (rain, mower busy, already mowed today, spacing guard), the select does NOT flip — the same zone tries again on the next trigger.
+Alternation is enforced by `input_select.next_zone_to_mow` (values: `garten` / `seite`). After a **successful mow** (mower reaches `MODE_READY` for 2 min with `progress ≥ 100`), a companion automation `mower_completion_tracker` flips the select to the other zone. If a dispatch attempt fails (rain, mower busy, already mowed today, spacing guard), the select does NOT flip — the same zone keeps its turn until it genuinely completes. This means rain-interrupted mows retain their alternation slot: the zone that started but didn't finish will be tried again on the next dispatch.
 
 The daily trigger fires at **09:00** — early enough to catch a dry morning window before typical afternoon rain, late enough to avoid dew and neighbor-noise complaints.
+
+## Mower state model
+
+The dispatcher only starts a NEW mow when `sensor.yuka_mnu7nps5_activity_mode == MODE_READY` (mower is docked and idle). All other activity_modes are recognized:
+
+| Activity mode | Interpretation | Dispatcher behavior |
+|---|---|---|
+| `MODE_READY` | Docked, idle | Ready to start a fresh mow |
+| `MODE_WORKING` | Actively mowing | No action; wait for completion |
+| `MODE_RETURNING` | Heading back to dock | No action; wait for READY |
+| `MODE_PAUSE` | Interrupted (rain, stuck, error) | No action; `automation.mower_paused_continue` handles resumption |
+
+This division of labor means:
+- **Our `mower_dispatch`** only starts new mows from READY. Never tries to press an Aufgabe button on top of a paused task.
+- **Your independent `mower_paused_continue`** (unrelated to this package) handles resumption of paused tasks by calling `lawn_mower.start_mowing`, with its own 3-retry budget and battery-gate.
+
+Together they cover both paths: fresh starts (us) and resume-after-pause (them).
 
 ## Wiring in this branch
 
@@ -41,8 +58,7 @@ The daily trigger fires at **09:00** — early enough to catch a dry morning win
 │  Guards (all must pass):                                             │
 │   • input_boolean.mowing_automation_enabled = on                     │
 │   • input_boolean.do_not_mow                = off                    │
-│   • lawn_mower.yuka_mnu7nps5 NOT in [mowing, returning,              │
-│                                      unavailable, unknown]           │
+│   • sensor.yuka_mnu7nps5_activity_mode      = MODE_READY             │
 │   • Before sunset - 3h                                               │
 │                                                                      │
 │  Runtime checks against the target zone (input_select.next_zone_to_  │
@@ -52,10 +68,29 @@ The daily trigger fires at **09:00** — early enough to catch a dry morning win
 │                                                                      │
 │  If all pass:                                                        │
 │    -> script.mow_<zone>                                              │
-│    -> delay 5s                                                       │
-│    -> flip input_select.next_zone_to_mow to the OTHER zone           │
 │                                                                      │
 │  If any fail: do nothing, next trigger tries again with SAME zone.   │
+│  next_zone_to_mow is NOT flipped here — the completion tracker owns  │
+│  that.                                                               │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│  automation.mower_completion_tracker                                 │
+│                                                                      │
+│  Trigger:                                                            │
+│   • state: activity_mode -> MODE_READY for 2 min                     │
+│                                                                      │
+│  Conditions:                                                         │
+│   • sensor.yuka_mnu7nps5_progress >= 100                             │
+│   • input_text.last_lawn_mowed in ['Garten', 'Seite']                │
+│     (i.e. our script attributed this mow, we haven't already         │
+│     credited it, and it's not a random dock event)                   │
+│                                                                      │
+│  Action:                                                             │
+│   • Flip input_select.next_zone_to_mow to the OTHER of the just-     │
+│     completed zone                                                   │
+│   • Clear input_text.last_lawn_mowed so we don't re-flip on          │
+│     subsequent MODE_READY events (mower re-docks, HA restarts, ...)  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 

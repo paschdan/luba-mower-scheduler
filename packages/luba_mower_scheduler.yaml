@@ -284,15 +284,18 @@ script:
       - condition: state
         entity_id: input_boolean.do_not_mow
         state: "off"
-      - condition: not
-        conditions:
-          - condition: state
-            entity_id: lawn_mower.yuka_mnu7nps5
-            state:
-              - mowing
-              - returning
-              - unavailable
-              - unknown
+      # Mower must be idle at the dock. MODE_READY is the only Yuka
+      # state where starting a fresh mow makes sense. Other states:
+      #   MODE_WORKING   -> already mowing
+      #   MODE_RETURNING -> heading back to dock
+      #   MODE_PAUSE     -> interrupted mow (rain / stuck) — let
+      #                     automation.mower_paused_continue resume it
+      #                     rather than starting a new task
+      #   MODE_CHARGING  -> if it ever appears
+      #   unavailable/unknown -> integration disconnected
+      - condition: state
+        entity_id: sensor.yuka_mnu7nps5_activity_mode
+        state: MODE_READY
 
       # ============================================================
       # Per-zone entity-id bindings (derived from zone_slug field)
@@ -556,15 +559,14 @@ automation:
       - condition: state
         entity_id: input_boolean.do_not_mow
         state: "off"
-      - condition: not
-        conditions:
-          - condition: state
-            entity_id: lawn_mower.yuka_mnu7nps5
-            state:
-              - mowing
-              - returning
-              - unavailable
-              - unknown
+      # Mower must be idle at the dock. Anything else (WORKING, PAUSE,
+      # RETURNING, ...) means either a mow is in progress or was
+      # interrupted; let automation.mower_paused_continue resume paused
+      # tasks, don't fire a fresh Aufgabe on top.
+      - condition: state
+        entity_id: sensor.yuka_mnu7nps5_activity_mode
+        state: MODE_READY
+      # Sunset cutoff: don't start after sunset - 3h.
       - condition: sun
         before: sunset
         before_offset: "-03:00:00"
@@ -585,20 +587,59 @@ automation:
           # mow-manually-then-schedule-fires-shortly-after.)
           spacing_ok: >
             {{ days_since_last | float(999) >= 2.0 }}
-          other_zone: "{{ 'seite' if next_zone == 'garten' else 'garten' }}"
       - choose:
           - conditions:
               - condition: template
                 value_template: "{{ not_mowed_today and spacing_ok }}"
             sequence:
-              # Run the wrapper for the target zone.
+              # Run the wrapper for the target zone. Alternation is NOT
+              # flipped here — that happens in mower_completion_tracker
+              # when the mower actually finishes (MODE_READY + progress 100).
+              # This way a rain-interrupted mow keeps its 'turn' until it
+              # genuinely completes.
               - action: "script.mow_{{ next_zone }}"
-              # Give the script a moment to flip lawn_mower state, then
-              # flip the select to the other zone so next dispatch alternates.
-              - delay:
-                  seconds: 5
-              - action: input_select.select_option
-                target:
-                  entity_id: input_select.next_zone_to_mow
-                data:
-                  option: "{{ other_zone }}"
+
+  # ---------------------------------------------------------------------------
+  # Completion tracker — flip alternation when a mow actually finishes.
+  #
+  # Fires when sensor.yuka_mnu7nps5_activity_mode transitions to MODE_READY
+  # (the Yuka is home, docked, task complete) and stays there for 2 min so
+  # we ignore transient blips during dock approach.
+  #
+  # Only counts as 'a completion we should attribute' if:
+  #   - progress >= 100  (the task actually finished, not manually docked
+  #                       or interrupted with the mower somehow still
+  #                       reaching READY)
+  #   - input_text.last_lawn_mowed is 'Garten' or 'Seite' (i.e. our script
+  #     just started a mow — this marker gets cleared here at the end so
+  #     we don't re-flip if the mower re-docks later).
+  # ---------------------------------------------------------------------------
+  - id: mower_completion_tracker
+    alias: Mower Completion Tracker
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: sensor.yuka_mnu7nps5_activity_mode
+        to: MODE_READY
+        for:
+          minutes: 2
+    condition:
+      - condition: numeric_state
+        entity_id: sensor.yuka_mnu7nps5_progress
+        above: 99
+      - condition: template
+        value_template: "{{ states('input_text.last_lawn_mowed') in ['Garten', 'Seite'] }}"
+    action:
+      # Flip next_zone_to_mow to the OTHER of the zone just completed.
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.next_zone_to_mow
+        data:
+          option: >-
+            {% if states('input_text.last_lawn_mowed') == 'Garten' %}seite{% else %}garten{% endif %}
+      # Clear the marker so subsequent MODE_READY events don't re-flip.
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.last_lawn_mowed
+        data:
+          value: ""
