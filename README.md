@@ -82,15 +82,24 @@ Branch C: COMPLETED — record the completion
     - clear input_text.last_lawn_mowed
 ```
 
-**Same-day chaining (Garten finishes → Seite starts)**:
-1. Garten completes → `MODE_READY` → Branch C fires 2 min later. Bumps `garten_last_mow_1 = now`. Clears `last_lawn_mowed`.
-2. Yuka charges back up (typically 1–2h). Battery reaches 100.
-3. `sensor.yuka_mnu7nps5_battery` transitions to `'100'` → `id: try` fires.
-4. Branch A guards check. All pass (`last_lawn_mowed` is now empty; mower is READY; still daylight). Alternation picks Seite (older). Spacing ≥ 2 days (Seite was Jul 16). Runs `script.mow_seite`.
+**Why alternation "just works"**:
+- **`input_text.last_dispatched_zone`** is the primary alternation signal. Set by `script.mow_lawn` on every dispatch, **never cleared automatically**. Branch A picks the OTHER zone. This guarantees "don't dispatch the same zone twice in a row" even when the previous attempt didn't complete.
+- **`input_datetime.<zone>_last_mow_1`** is the "last SUCCESSFUL mow" timestamp. Only advances in Branch C (completion). Used for the 2-day spacing guard and the `days_since_mow` sensor display.
+- Fallback: if `last_dispatched_zone` is empty (fresh install), Branch A picks by older timestamp.
 
-If rain rolls in before charging completes, or it's already past sunset − 3h, Branch A skips and Seite waits until the next `try` trigger (09:00 tomorrow, or an earlier rain-clear if applicable).
+**Rain-interrupted example**:
+1. `last_dispatched_zone = "Garten"`, Garten mid-mow. Rain interrupts.
+2. Rain clears next day. Battery hits 100 → TRY trigger fires.
+3. Branch A: `last_dispatched_zone = "Garten"` → **picks Seite**. ✅
+4. Seite mows, completes → Branch C bumps `seite_last_mow_1`, clears `last_lawn_mowed`. `last_dispatched_zone` stays "Seite".
+5. Next TRY → `last_dispatched_zone = "Seite"` → **picks Garten**. ✅
+6. Alternation continues indefinitely.
 
-**Why the `last_lawn_mowed == ''` guard on Branch A**: prevents a race where the battery-100 trigger fires before Branch C has finished bumping Garten's timestamp. If `last_lawn_mowed` still says `"Garten"`, Branch A refuses to fire and waits for the next trigger — by which time Branch C will have completed and cleared the marker.
+**Manual override**: set `input_text.last_dispatched_zone` from the UI to force which zone comes next. Setting to "Garten" means Seite is next; "Seite" means Garten is next.
+
+### On completion detection
+
+The COMPLETED trigger fires on `activity_mode` transitioning `MODE_RETURNING → MODE_READY` — that's the successful-completion path (the mower drove home after finishing a task). It fires **instantly** with no `for:` delay because the Yuka's `progress` sensor resets from 100 to 0 within milliseconds of hitting MODE_READY (verified empirically). The `from: MODE_RETURNING` filter also distinguishes real completions from other MODE_READY transitions (manual dock command → MODE_PAUSE → MODE_READY, HA restart, etc).
 
 ### `binary_sensor.mow_blocked` — the on/off gate
 
@@ -129,7 +138,18 @@ Companion `sensor.mow_block_reason` shows which specific signal is currently blo
 
 ## Manual mow
 
-Dashboard buttons `Garten jetzt mähen` / `Seite jetzt mähen` call `script.mow_garten` / `script.mow_seite` directly. Same guards as `mower_dispatch` apply (mowing enabled, not blocked, mower READY), so pressing the button while raining still refuses. Successful manual mow → same completion attribution as scheduled mow.
+Dashboard buttons `Garten jetzt mähen` / `Seite jetzt mähen` call `script.mow_garten` / `script.mow_seite` directly. Same guards as `mower_dispatch` apply (mowing enabled, not blocked, mower READY), so pressing the button while raining still refuses. Successful manual mow → same completion attribution as scheduled mow, and `last_dispatched_zone` advances so the automation alternates correctly on the next dispatch.
+
+## Cancel a running / paused task
+
+**`button.yuka_mnu7nps5_cancel_current_task`** on the dashboard cancels the current task on the mower. Use this if:
+
+- The mower is mowing the wrong zone and you want to stop it cleanly.
+- You want to force it out of `MODE_PAUSE` (e.g. after abandoning a rain-interrupted mow that you don't want the automation to resume).
+
+**`lawn_mower.dock` does NOT cancel the task** — it only sends the mower home and leaves the task in `MODE_PAUSE`. To truly reset the mower to `MODE_READY`, use the cancel button.
+
+The automation's Branch B (RESUME) will re-attempt a paused task as long as the task is still active on the mower. Cancel the task first if you want a clean start.
 
 ## Interaction with `automation.mower_paused_continue`
 

@@ -156,7 +156,7 @@ input_text:
     initial: ""
     max: 100
     # Set by script.mow_lawn on dispatch. Read by mower_dispatch's completed
-    # branch to know which zone to credit on MODE_READY.
+    # branch to know which zone to credit on MODE_READY. Cleared on completion.
 
   # LEGACY — replaced by sensor.mow_block_reason. Kept for old dashboard
   # references. Remove when dashboard is cleaned up.
@@ -164,6 +164,13 @@ input_text:
     name: Reason No Mow (legacy, unused)
     initial: ""
     max: 100
+
+# ADDITIONAL STORAGE-MODE HELPER (not defined here, created via UI/API):
+#   input_text.last_dispatched_zone
+#     Set by script.mow_lawn on every dispatch. NEVER cleared automatically.
+#     Used by Branch A alternation: 'next_zone = the other of last_dispatched'.
+#     This ensures alternation advances even if a mow was interrupted.
+#     Create via: Settings > Devices & Services > Helpers > Create > Text.
 
 
 # -----------------------------------------------------------------------------
@@ -353,8 +360,8 @@ script:
           text:
     sequence:
       # ============================================================
-      # Guards (mirror of mower_dispatch's TRY branch — the dashboard
-      # 'jetzt mähen' button can call this script directly).
+      # Guards (mirror of mower_dispatch's Branch A guards — the
+      # dashboard 'jetzt mähen' button can call this script directly).
       # ============================================================
       - condition: state
         entity_id: input_boolean.mowing_automation_enabled
@@ -366,11 +373,22 @@ script:
         entity_id: sensor.yuka_mnu7nps5_activity_mode
         state: MODE_READY
 
-      # Record which zone we just dispatched. mower_dispatch's completed
-      # branch reads this to know which timestamp to bump on MODE_READY.
+      # Attribution marker for the completion tracker. Cleared in
+      # Branch C after the mow completes.
       - action: input_text.set_value
         target:
           entity_id: input_text.last_lawn_mowed
+        data:
+          value: "{{ zone_label }}"
+
+      # Alternation memory: which zone was most recently dispatched.
+      # NEVER cleared automatically. This is the anchor for Branch A's
+      # 'don't dispatch the same zone twice in a row' rule. Used to
+      # ensure alternation advances even when a mow doesn't complete
+      # (rain interruption, manual stop, etc.).
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.last_dispatched_zone
         data:
           value: "{{ zone_label }}"
 
@@ -406,7 +424,7 @@ script:
 
 
 # -----------------------------------------------------------------------------
-# AUTOMATIONS — just ONE, with two trigger-id branches
+# AUTOMATIONS — one automation with three trigger-id branches
 # -----------------------------------------------------------------------------
 automation:
   - id: mower_dispatch
@@ -416,9 +434,7 @@ automation:
       # TRY: fires whenever it might be time to start (or resume) a mow.
       #   - Daily at 09:00 (baseline attempt)
       #   - When rain clears (binary_sensor.mow_blocked on -> off)
-      #   - When battery just finished charging (100% transition) — this is
-      #     what chains 'Garten just finished' -> 'Seite starts' once the
-      #     mower has charged back up from the completed mow.
+      #   - When battery just finished charging (100% transition)
       - platform: time
         at: "09:00:00"
         id: try
@@ -431,17 +447,38 @@ automation:
         entity_id: sensor.yuka_mnu7nps5_battery
         to: "100"
         id: try
-      # COMPLETED: mower reached READY and stayed there for 2 min.
+      # COMPLETED: activity_mode transitions from MODE_RETURNING to MODE_READY.
+      # This is the successful-completion path: the mower drove home after
+      # finishing a task. Fires INSTANTLY (no `for:`) because the mower's
+      # `progress` sensor resets to 0 within milliseconds of MODE_READY, so
+      # we can't rely on `for: 2min + progress > 99` — the value would already
+      # be 0 by the time we checked. The `from: MODE_RETURNING` filter
+      # discriminates completion from other paths (PAUSE -> READY = manual
+      # dock or abandonment).
       - platform: state
         entity_id: sensor.yuka_mnu7nps5_activity_mode
+        from: MODE_RETURNING
         to: MODE_READY
-        for:
-          minutes: 2
         id: completed
     action:
       - choose:
           # =========================================================
           # Branch A: START a fresh mow (mower idle at dock).
+          #
+          # Alternation rule:
+          #   1. If input_text.last_dispatched_zone is 'Garten' or 'Seite',
+          #      pick the OTHER zone. This is the primary alternation signal
+          #      — set by script.mow_lawn on every dispatch, NEVER cleared
+          #      automatically. It advances alternation even when a mow was
+          #      interrupted before completion.
+          #   2. Fallback: if last_dispatched_zone is empty (fresh install),
+          #      pick whichever zone was successfully mowed longer ago (by
+          #      last_mow_1 timestamp).
+          #
+          # Spacing rule:
+          #   The picked zone must have been last SUCCESSFULLY mowed >= 2
+          #   days ago (checked against last_mow_1 timestamp, which advances
+          #   only on Branch C completion — not on dispatch).
           # =========================================================
           - conditions:
               - condition: trigger
@@ -455,10 +492,10 @@ automation:
               - condition: state
                 entity_id: sensor.yuka_mnu7nps5_activity_mode
                 state: MODE_READY
-              # No pending completion attribution. When a mow is running (or
-              # just finished before Branch C had a chance to fire), last_
-              # lawn_mowed is set. This guard prevents Branch A from
-              # picking the just-completed zone again in a race with Branch C.
+              # No pending completion attribution: if last_lawn_mowed is
+              # non-empty, a mow is still in flight (or just finished but
+              # Branch C hasn't run yet). Wait for that to resolve before
+              # starting a new mow.
               - condition: state
                 entity_id: input_text.last_lawn_mowed
                 state: ""
@@ -467,16 +504,17 @@ automation:
                 before_offset: "-03:00:00"
             sequence:
               - variables:
-                  # Alternation by timestamp: pick whichever zone was last
-                  # SUCCESSFULLY mowed longer ago. Because last_mow_1 is bumped
-                  # only in the COMPLETED branch below (not on dispatch), a
-                  # rain-interrupted attempt does NOT lose alternation.
+                  last_dispatched: "{{ states('input_text.last_dispatched_zone') }}"
                   garten_ts: "{{ state_attr('input_datetime.garten_last_mow_1','timestamp') | float(0) }}"
                   seite_ts:  "{{ state_attr('input_datetime.seite_last_mow_1','timestamp')  | float(0) }}"
-                  next_zone: "{{ 'garten' if garten_ts <= seite_ts else 'seite' }}"
+                  # Primary: OTHER of last_dispatched. Fallback: older-timestamp.
+                  next_zone: >-
+                    {% if last_dispatched == 'Garten' %}seite
+                    {% elif last_dispatched == 'Seite' %}garten
+                    {% else %}{{ 'garten' if garten_ts <= seite_ts else 'seite' }}
+                    {% endif %}
                   target_ts: "{{ garten_ts if next_zone == 'garten' else seite_ts }}"
                   days_since: "{{ ((now().timestamp() - target_ts) / 86400) if target_ts else 999 }}"
-                  # Spacing: at least 2 days since same zone's last SUCCESSFUL mow.
                   spacing_ok: "{{ days_since | float(999) >= 2.0 }}"
               - choose:
                   - conditions:
@@ -488,13 +526,11 @@ automation:
           # =========================================================
           # Branch B: RESUME a paused mow (mower is at dock in MODE_PAUSE).
           #
-          # lawn_mower.start_mowing is what Mammotion treats as 'continue
-          # paused task'. We do NOT press an Aufgabe button here — that
-          # would start a NEW task and abandon the paused one.
-          #
-          # No spacing check (continuation, not fresh mow). last_lawn_mowed
-          # remains set from the original dispatch, so when the mow
-          # eventually completes Branch C attributes to the right zone.
+          # lawn_mower.start_mowing is what Mammotion treats as
+          # 'continue paused task' — it does NOT start a new task.
+          # No spacing check; this is a continuation.
+          # last_lawn_mowed remains set from the original dispatch so
+          # Branch C attributes correctly when the mow finally finishes.
           # =========================================================
           - conditions:
               - condition: trigger
@@ -519,21 +555,18 @@ automation:
           # =========================================================
           # Branch C: COMPLETED — record the completion.
           #
-          # Bumps the completed zone's last_mow_1 timestamp, which
-          # naturally promotes the OTHER zone to 'older' so the next
-          # Branch A pick will be different.
-          #
-          # Clears input_text.last_lawn_mowed. The battery-100 trigger
-          # will fire once charging completes and Branch A will then
-          # pick up naturally (assuming guards allow — dry, before
-          # sunset-3h, etc.).
+          # Bumps the completed zone's last_mow_1 timestamp (used for
+          # spacing checks and 'days since mow' sensor). Clears
+          # last_lawn_mowed to release the Branch A guard for the next
+          # dispatch. Does NOT clear last_dispatched_zone — that stays
+          # set so alternation still knows what to pick next.
           # =========================================================
           - conditions:
               - condition: trigger
                 id: completed
-              - condition: numeric_state
-                entity_id: sensor.yuka_mnu7nps5_progress
-                above: 99
+              # Only attribute completions we started (guard against
+              # spurious MODE_RETURNING -> READY transitions from manual
+              # docks or startup blips).
               - condition: template
                 value_template: "{{ states('input_text.last_lawn_mowed') in ['Garten', 'Seite'] }}"
             sequence:

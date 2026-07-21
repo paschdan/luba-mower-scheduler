@@ -19,6 +19,8 @@ cards:
         name: Mähen blockiert (auto)
       - entity: input_boolean.block_night_mowing
         name: Nachts blockieren
+      - entity: input_text.last_dispatched_zone
+        name: Zuletzt dispatched
       - entity: sensor.mow_block_reason
         name: Grund
 
@@ -53,6 +55,8 @@ cards:
         name: Klingen-Laufzeit (h)
       - entity: sensor.yuka_blade_wear_overdue
         name: Klinge überfällig (h)
+      - entity: button.yuka_mnu7nps5_cancel_current_task
+        name: Aktuelle Aufgabe abbrechen
 
   # ---- Weather ------------------------------------------------------------
   - type: entities
