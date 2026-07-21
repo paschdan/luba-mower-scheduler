@@ -133,10 +133,12 @@ input_boolean:
 
 # -----------------------------------------------------------------------------
 # HELPERS: per-zone rolling mow-history
-#   <zone>_last_mow_1/2/3 = rolling history of the last three mows (1 = newest)
-#
-# Bumped only in mower_dispatch's 'completed' branch, so the timestamp
-# reflects the last SUCCESSFUL mow, not the last DISPATCH attempt.
+#   <zone>_last_mow_1/2/3 = rolling history of the last three COMPLETED mows
+#     (bumped in mower_dispatch's Branch C on MODE_RETURNING -> MODE_READY).
+#     Drives sensor.<zone>_days_since_mow.
+#   <zone>_last_start = timestamp of the last DISPATCH for this zone
+#     (set by script.mow_lawn on every dispatch, whether it completes or not).
+#     Drives the spacing guard AND the same-day-chain rule in mower_dispatch.
 # -----------------------------------------------------------------------------
 input_datetime:
   garten_last_mow_1: { name: Garten Last Mow 1, has_date: true, has_time: true }
@@ -145,6 +147,14 @@ input_datetime:
   seite_last_mow_1:  { name: Seite Last Mow 1,  has_date: true, has_time: true }
   seite_last_mow_2:  { name: Seite Last Mow 2,  has_date: true, has_time: true }
   seite_last_mow_3:  { name: Seite Last Mow 3,  has_date: true, has_time: true }
+
+# ADDITIONAL storage-mode input_datetime helpers (created via UI/API, not
+# declared here):
+#   input_datetime.garten_last_start
+#   input_datetime.seite_last_start
+# These hold the timestamp of the last DISPATCH (not completion) for each
+# zone. Used by mower_dispatch for spacing checks and the same-day-chain
+# guard. Create via: Settings > Devices & Services > Helpers > Date/time.
 
 
 # -----------------------------------------------------------------------------
@@ -332,6 +342,7 @@ sensor:
       hours: 6
 
 
+
 # -----------------------------------------------------------------------------
 # SCRIPTS
 # -----------------------------------------------------------------------------
@@ -343,26 +354,24 @@ script:
     max: 5
     fields:
       zone_slug:
-        description: "Zone slug (garten, seite, ...) — used to build helper entity IDs"
+        description: "Zone slug (garten, seite, ...)"
         example: "garten"
         selector:
           text:
       zone_button:
-        description: "Saved-task button entity_id for this zone"
+        description: "Saved-task button entity_id"
         example: "button.garten_yuka_mnu7nps5_aufgabe_1"
         selector:
           entity:
             domain: button
       zone_label:
-        description: "Human-readable label (used to attribute completions)"
+        description: "Human-readable label"
         example: "Garten"
         selector:
           text:
     sequence:
-      # ============================================================
-      # Guards (mirror of mower_dispatch's Branch A guards — the
-      # dashboard 'jetzt mähen' button can call this script directly).
-      # ============================================================
+      # Guards (mirror mower_dispatch Branch A; dashboard buttons call this
+      # script directly so we re-check here).
       - condition: state
         entity_id: input_boolean.mowing_automation_enabled
         state: "on"
@@ -373,31 +382,37 @@ script:
         entity_id: sensor.yuka_mnu7nps5_activity_mode
         state: MODE_READY
 
-      # Attribution marker for the completion tracker. Cleared in
-      # Branch C after the mow completes.
+      # Completion-attribution marker (cleared in Branch C on completion).
       - action: input_text.set_value
         target:
           entity_id: input_text.last_lawn_mowed
         data:
           value: "{{ zone_label }}"
 
-      # Alternation memory: which zone was most recently dispatched.
-      # NEVER cleared automatically. This is the anchor for Branch A's
-      # 'don't dispatch the same zone twice in a row' rule. Used to
-      # ensure alternation advances even when a mow doesn't complete
-      # (rain interruption, manual stop, etc.).
+      # Alternation memory (NEVER cleared automatically). Ensures next Branch A
+      # picks the OTHER zone even if this mow doesn't complete.
       - action: input_text.set_value
         target:
           entity_id: input_text.last_dispatched_zone
         data:
           value: "{{ zone_label }}"
 
+      # DISPATCH timestamp for this zone. Used by mower_dispatch for:
+      #   1. Spacing guard (>= 1.5 days between same-zone dispatches).
+      #   2. Same-day-chain rule (if THIS zone was started earlier today,
+      #      don't dispatch again; if it started YESTERDAY or earlier, a
+      #      chain-to-the-other-zone same-day is allowed as recovery).
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: "input_datetime.{{ zone_slug }}_last_start"
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
       # Fire the saved-task button.
       - action: button.press
         target:
           entity_id: "{{ zone_button }}"
 
-  # Per-zone wrappers so schedules/dashboard buttons can call a no-argument script.
   mow_garten:
     alias: Mow Garten
     icon: mdi:robot-mower
@@ -424,17 +439,14 @@ script:
 
 
 # -----------------------------------------------------------------------------
-# AUTOMATIONS — one automation with three trigger-id branches
+# AUTOMATIONS
 # -----------------------------------------------------------------------------
 automation:
   - id: mower_dispatch
     alias: Mower Dispatch
     mode: single
     trigger:
-      # TRY: fires whenever it might be time to start (or resume) a mow.
-      #   - Daily at 09:00 (baseline attempt)
-      #   - When rain clears (binary_sensor.mow_blocked on -> off)
-      #   - When battery just finished charging (100% transition)
+      # TRY: might be time to start (or resume) a mow.
       - platform: time
         at: "09:00:00"
         id: try
@@ -447,14 +459,9 @@ automation:
         entity_id: sensor.yuka_mnu7nps5_battery
         to: "100"
         id: try
-      # COMPLETED: activity_mode transitions from MODE_RETURNING to MODE_READY.
-      # This is the successful-completion path: the mower drove home after
-      # finishing a task. Fires INSTANTLY (no `for:`) because the mower's
-      # `progress` sensor resets to 0 within milliseconds of MODE_READY, so
-      # we can't rely on `for: 2min + progress > 99` — the value would already
-      # be 0 by the time we checked. The `from: MODE_RETURNING` filter
-      # discriminates completion from other paths (PAUSE -> READY = manual
-      # dock or abandonment).
+      # COMPLETED: mower drove home after finishing a task.
+      # Fires INSTANTLY (no `for:`) because the Yuka's `progress` sensor
+      # resets to 0 within milliseconds of MODE_READY.
       - platform: state
         entity_id: sensor.yuka_mnu7nps5_activity_mode
         from: MODE_RETURNING
@@ -465,20 +472,15 @@ automation:
           # =========================================================
           # Branch A: START a fresh mow (mower idle at dock).
           #
-          # Alternation rule:
-          #   1. If input_text.last_dispatched_zone is 'Garten' or 'Seite',
-          #      pick the OTHER zone. This is the primary alternation signal
-          #      — set by script.mow_lawn on every dispatch, NEVER cleared
-          #      automatically. It advances alternation even when a mow was
-          #      interrupted before completion.
-          #   2. Fallback: if last_dispatched_zone is empty (fresh install),
-          #      pick whichever zone was successfully mowed longer ago (by
-          #      last_mow_1 timestamp).
-          #
-          # Spacing rule:
-          #   The picked zone must have been last SUCCESSFULLY mowed >= 2
-          #   days ago (checked against last_mow_1 timestamp, which advances
-          #   only on Branch C completion — not on dispatch).
+          # Rules:
+          #   - Alternation: input_text.last_dispatched_zone.
+          #   - Spacing: last DISPATCH (not last completion) of the picked
+          #     zone was >= 1.5 days ago.
+          #   - Daily-cadence: allow only if the PICKED zone hasn't been
+          #     started today. The OTHER zone may have been started today
+          #     (chain-after-recovery case is allowed).
+          #   - Sunday: no dispatch (weekday != 6, Monday=0).
+          #   - Before sunset - 3h.
           # =========================================================
           - conditions:
               - condition: trigger
@@ -492,45 +494,53 @@ automation:
               - condition: state
                 entity_id: sensor.yuka_mnu7nps5_activity_mode
                 state: MODE_READY
-              # No pending completion attribution: if last_lawn_mowed is
-              # non-empty, a mow is still in flight (or just finished but
-              # Branch C hasn't run yet). Wait for that to resolve before
-              # starting a new mow.
               - condition: state
                 entity_id: input_text.last_lawn_mowed
                 state: ""
+              # No mowing on Sunday.
+              - condition: template
+                value_template: "{{ now().weekday() != 6 }}"
               - condition: sun
                 before: sunset
                 before_offset: "-03:00:00"
             sequence:
               - variables:
                   last_dispatched: "{{ states('input_text.last_dispatched_zone') }}"
-                  garten_ts: "{{ state_attr('input_datetime.garten_last_mow_1','timestamp') | float(0) }}"
-                  seite_ts:  "{{ state_attr('input_datetime.seite_last_mow_1','timestamp')  | float(0) }}"
-                  # Primary: OTHER of last_dispatched. Fallback: older-timestamp.
+                  garten_start_ts: "{{ state_attr('input_datetime.garten_last_start','timestamp') | float(0) }}"
+                  seite_start_ts:  "{{ state_attr('input_datetime.seite_last_start','timestamp')  | float(0) }}"
+                  today: "{{ now().date() | string }}"
+                  garten_started_today: >-
+                    {{ garten_start_ts > 0 and
+                       (garten_start_ts | as_datetime | as_local).date() | string == today }}
+                  seite_started_today: >-
+                    {{ seite_start_ts > 0 and
+                       (seite_start_ts | as_datetime | as_local).date() | string == today }}
                   next_zone: >-
                     {% if last_dispatched == 'Garten' %}seite
                     {% elif last_dispatched == 'Seite' %}garten
-                    {% else %}{{ 'garten' if garten_ts <= seite_ts else 'seite' }}
+                    {% else %}{{ 'garten' if garten_start_ts <= seite_start_ts else 'seite' }}
                     {% endif %}
-                  target_ts: "{{ garten_ts if next_zone == 'garten' else seite_ts }}"
-                  days_since: "{{ ((now().timestamp() - target_ts) / 86400) if target_ts else 999 }}"
-                  spacing_ok: "{{ days_since | float(999) >= 2.0 }}"
+                  target_start_ts: "{{ garten_start_ts if next_zone == 'garten' else seite_start_ts }}"
+                  days_since_start: >-
+                    {{ ((now().timestamp() - target_start_ts) / 86400) if target_start_ts else 999 }}
+                  spacing_ok: "{{ days_since_start | float(999) >= 1.5 }}"
+                  target_started_today: >-
+                    {{ garten_started_today if next_zone == 'garten' else seite_started_today }}
+                  daily_ok: "{{ not target_started_today }}"
               - choose:
                   - conditions:
                       - condition: template
                         value_template: "{{ spacing_ok }}"
+                      - condition: template
+                        value_template: "{{ daily_ok }}"
                     sequence:
                       - action: "script.mow_{{ next_zone }}"
 
           # =========================================================
-          # Branch B: RESUME a paused mow (mower is at dock in MODE_PAUSE).
-          #
-          # lawn_mower.start_mowing is what Mammotion treats as
-          # 'continue paused task' — it does NOT start a new task.
-          # No spacing check; this is a continuation.
-          # last_lawn_mowed remains set from the original dispatch so
-          # Branch C attributes correctly when the mow finally finishes.
+          # Branch B: RESUME a paused mow.
+          # Same guards as A minus daily/Sunday (we're finishing existing
+          # work, not starting new). Mammotion firmware treats
+          # lawn_mower.start_mowing on MODE_PAUSE as 'continue paused task'.
           # =========================================================
           - conditions:
               - condition: trigger
@@ -554,19 +564,14 @@ automation:
 
           # =========================================================
           # Branch C: COMPLETED — record the completion.
-          #
-          # Bumps the completed zone's last_mow_1 timestamp (used for
-          # spacing checks and 'days since mow' sensor). Clears
-          # last_lawn_mowed to release the Branch A guard for the next
-          # dispatch. Does NOT clear last_dispatched_zone — that stays
-          # set so alternation still knows what to pick next.
+          # Bumps <zone>_last_mow_1 (drives days_since_mow sensor).
+          # Alternation and spacing are already handled by
+          # last_dispatched_zone and <zone>_last_start (both set in
+          # script.mow_lawn on dispatch), not by this.
           # =========================================================
           - conditions:
               - condition: trigger
                 id: completed
-              # Only attribute completions we started (guard against
-              # spurious MODE_RETURNING -> READY transitions from manual
-              # docks or startup blips).
               - condition: template
                 value_template: "{{ states('input_text.last_lawn_mowed') in ['Garten', 'Seite'] }}"
             sequence:
