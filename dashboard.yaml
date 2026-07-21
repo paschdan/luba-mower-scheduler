@@ -81,8 +81,6 @@ cards:
     entities:
       - entity: sensor.garten_days_since_mow
         name: Tage seit letztem Mähen
-      - entity: input_datetime.garten_last_mow_1
-        name: Zuletzt gemäht
       - type: button
         name: Garten jetzt mähen
         icon: mdi:robot-mower
@@ -96,8 +94,6 @@ cards:
     entities:
       - entity: sensor.seite_days_since_mow
         name: Tage seit letztem Mähen
-      - entity: input_datetime.seite_last_mow_1
-        name: Zuletzt gemäht
       - type: button
         name: Seite jetzt mähen
         icon: mdi:robot-mower
